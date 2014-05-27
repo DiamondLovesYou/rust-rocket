@@ -1,3 +1,6 @@
 [submodule "deps/sqlite"]
 	path = deps/sqlite
 	url = https://github.com/linuxfood/rustsqlite.git
+[submodule "deps/bindgen"]
+	path = deps/bindgen
+	url = https://github.com/crabtw/rust-bindgen.git
