@@ -23,14 +23,14 @@ use std::hash::sip::SipState;
 use address::SourceAddress;
 use override::Overrides;
 
-/// singleton task POV
+// singleton task POV
 enum Message {
     AddIfRefMsg,
-    /// if Some(..), send back the post de-reference ref count.
-    /// used during shutdown to assert there are no more refs.
+    // if Some(..), send back the post de-reference ref count.
+    // used during shutdown to assert there are no more refs.
     DropIfRefMsg(Option<Chan<u64>>),
     
-    /// sends back true if the work was identical to existing work.
+    // sends back true if the work was identical to existing work.
     CacheMsg(Chan<CachingResult>, Port<Vec<u8>>, Key),
     
     HelperFinishedCachingMsg(HelperCachingResult),
@@ -70,22 +70,22 @@ static CACHE_ARTIFACT_SUBPATH: &'static str = ".cache";
 static DB_VERSION: u64 = 0;
 #[deriving(Encodable, Decodable)]
 struct Db {
-    /// we need consistent hashes:
+    // we need consistent hashes:
     hash_keys: (u64, u64),
     cache: HashMap<KeyId, Entry>,
     
     cache_path: Path,
 }
-/// houses the runtime needs of a workcache task. It is not saved.
+// houses the runtime needs of a workcache task. It is not saved.
 struct Session {
     db: Db,
     db_file: File,
     hasher: SipState,
     own: SessionIf,
     ref_count: u64,
-    /// the helpers waiting for work.
+    // the helpers waiting for work.
     helpers: RingBuf<HelperIf>,
-    /// the queue of work waiting for helpers.
+    // the queue of work waiting for helpers.
     work:    RingBuf<HelperWork>,
 }
 impl Session {
@@ -210,7 +210,7 @@ impl Session {
         
     }
 
-    fn process_messages<T: Iterator<Message>>(&mut self, msgs: T) {
+    fn process_messages<T: Iterator<Message>>(&mut self, mut msgs: T) {
         for msg in msgs {
             match msg {
                 DropIfRefMsg(None) => { self.ref_count -= 1; },
@@ -380,7 +380,7 @@ pub struct SessionIf {
 }
 impl SessionIf {
     
-    /// starts the global workcache task and returns the seeding interface
+    // starts the global workcache task and returns the seeding interface
     pub fn new(db: &Path,
                artifact: &Path) -> IoResult<SessionIf> {
         Session::new(Chan::new(), db, artifact)
@@ -405,7 +405,6 @@ impl SessionIf {
         writer.flush();
         Future::from_port(ret)
     }
-                      
 }
 impl clone::Clone for SessionIf {
     fn clone(&self) -> SessionIf {

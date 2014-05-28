@@ -38,7 +38,7 @@ enum CMIMessage {
     GetCodeMapCMIMessage(Chan<codemap::CodeMap>),
 }
 pub struct CodeMapperInterface {
-    priv chan: Chan<CMIMessage>,
+    chan: Chan<CMIMessage>,
 }
 impl CodeMapperInterface {
     fn new() -> CodeMapperInterface {
@@ -72,7 +72,7 @@ enum UserConfigMessage {
     QuitUCMessage(comm::Port<()>),
 }
 pub struct UserConfigInterface {
-    priv chan: comm::Chan<UserConfigMessage>,
+    chan: comm::Chan<UserConfigMessage>,
 }
 impl drop::Drop for UserConfigInterface {
     fn drop(&mut self) {
@@ -88,7 +88,7 @@ enum BackendLoggerMessage {
 }
 /// a logger used in the backend task for non-fatal messages (mostly just for warnings).
 pub struct BackendLoggerIf {
-    priv chan: Chan<BackendLoggerMessage>
+    chan: Chan<BackendLoggerMessage>
 }
 pub enum StaleDataset<TSet> {
     /// if the db version in the file doesn't match FRESHNESS_DB_VERSION,
@@ -178,7 +178,7 @@ impl FreshnessDb {
 /// Naturally, it also maintains the list of files we use to decide what needs to be built.
 /// It is target independent due to the target independent nature of source files.
 pub struct FreshnessIf {
-    priv chan: Chan<FreshnessMessage>,
+    chan: Chan<FreshnessMessage>,
 }
 static FRESHNESS_DB_VERSION: uint = 0;
 impl FreshnessIf {
@@ -347,6 +347,13 @@ impl FreshnessIf {
 pub struct TargetIf {
 }
 
+pub trait Driver {
+    fn fatal(&self, origin: Origin, msg: &str) -> !;
+    fn err(&self, origin: Origin, msg: &str);
+    fn warn(&self, origin: Origin, msg: &str);
+    fn info(&self, origin: Origin, msg: &str);
+}
+
 #[deriving(Clone)]
 pub struct Session_ {
     priv codemapper: CodeMapperIf,
@@ -357,17 +364,7 @@ pub struct Session_ {
 pub trait Session {
     fn codemapper(&self) -> CodeMapperIf;
     fn freshness(&self) -> FreshnessIf;
-    fn dep(&self) -> DepIf;
-
-    fn fatal(&self, msg: &str) -> !;
-    fn err(&self, msg: &str);
-    fn warn(&self, msg: &str);
-    fn info(&self, msg: &str);
-
-    fn origin_fatal(&self, origin: Origin, msg: &str) -> !;
-    fn origin_err(&self, origin: Origin, msg: &str);
-    fn origin_warn(&self, origin: Origin, msg: &str);
-    fn origin_info(&self, origin: Origin, msg: &str);
+    fn dep(&self) -> DepIf;    
 
     fn ensure_dir(&self, dir: &Path) {
         if dir.exists() {
@@ -435,12 +432,6 @@ impl Router {
     }
 }
 impl Session for Router {
-    fn fatal(&self, origin: Origin, msg: &str) -> ! {
-    }
-    fn err(&self, origin: Origin, msg: &str) {
-    }
-    fn warn(&self, origin: Origin, msg: &str) {
-    }
 
     fn target_id(&self) -> TargetId {
         self.addr.target_id().expect("this address should always have a target prefix")
@@ -458,7 +449,7 @@ pub struct Configure {
     default_target: Option<Target>,
 }
 pub struct Target {
-    name: ~str,
+    name: StrBuf,
     mach: mach_target::Target,
     
 }
@@ -481,12 +472,12 @@ pub fn find_crates_in_dir<TSess: Session>(_sess: &TSess, cwd: &Path) -> io::IoRe
     result::Ok(contents.move_iter().filter_map(|p| {
             // FIXME(diamond): this could reasonably be done in parallel.
             task::try(proc() {
-                    let cm = @codemap::CodeMap::new();
+                    let cm = codemap::CodeMap::new();
                     let sh = mk_silent_span_handler(cm);
                     let parse_sess = ParseSess::new_special_handler_path(sh,
                                                                          cm,
                                                                          path);
-                    let crate_config = ~[];
+                    let crate_config = Vec::new();
                     let attrs = parse_crate_attrs_from_file(p,
                                                             crate_config,
                                                             parse_sess);

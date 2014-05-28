@@ -23,6 +23,8 @@ use serialize::{Encodable, Decodable};
 use std::io::Writer;
 use collection::hashmap::{HashMap, HashSet};
 
+use platform_dep::ToolId;
+
 pub type Level = u64;
 
 
@@ -43,14 +45,14 @@ pub enum MultiSetKind {
     AddMSK,
     RemoveMSK,
 }
-#[deriving(Encodable, Decodable, Eq, Clone, Hash)]
+#[deriving(Encodable, Decodable, Eq, Clone, Hash, Ord, TotalOrd)]
 pub enum MultiSetPosition<T> {
     DontCareMSP,
     BeforeMSP(T),
     AfterMSP(T),
 }
 #[deriving(Encodable, Decodable)]
-pub enum MultiSetValue<T: Encodable + Decodable> {
+pub enum MultiSetValue<T> {
     ReplaceMultiSetValue(MultiSetKind, T, T),
     
     FlagMultiSetValue(MultiSetKind, MultiSetPosition<T>, T),
@@ -68,9 +70,9 @@ impl<T: cmp::TotalOrd> cmp::TotalOrd for MultiSetValue<T> {
         } {
             cmp::Equal => {
                 match self {
-                    &ReplaceMultiSetValue(RemoveMultiSetKind, ..) => {
+                    &ReplaceMultiSetValue(RemoveMultiSetKind, _, _) => {
                         match other {
-                            &ReplaceMultiSetValue(RemoveMultiSetKind, ..) => Equal,
+                            &ReplaceMultiSetValue(RemoveMultiSetKind, _, _) => Equal,
                             _ => Less,
                         }
                     }
@@ -85,13 +87,13 @@ impl<T: cmp::TotalOrd> cmp::TotalOrd for MultiSetValue<T> {
 #[deriving(Encodable, Decodable)]
 pub enum CrateSource {
     FileCrateSource(Path),
-    /// like a -L path
+    // like a -L path
     DirCrateSource(Path),
 
     RepoCrateSource(repo::Url),
 }
-#[deriving(Encodable, Decodable)]
-pub struct Value<T: Encodeable + Decodable> {
+#[deriving(Encodable, Decodable, Clone, Hash)]
+pub struct Value<T> {
     origin: Origin,
     level:  u64,
     value:  T,
@@ -127,22 +129,23 @@ pub trait HasEmbedded<T> {
 
 impl<T> HasEmbedded<Value<T>> for Value<Value<T>> {
     pub fn propagate_level(&self) -> Value<T> {
-        Value<T> {
+        Value {
             level: self.level.checked_add(self.value.level).unwrap_or(u64::MAX),
             .. self.value.clone()
         }
     }
 }
-impl<T> HasEmbedded<~[Value<T>]> Value<~[Value<T>]> {
-    pub fn propagate_level(&self) -> ~[Value<T>] {
+impl<T> HasEmbedded<Vec<Value<T>>> for Value<Vec<Value<T>>> {
+    pub fn propagate_level(&self) -> Vec<Value<T>> {
         self.value.iter().map(|v| {
-                Value<T> {
+                Value {
                     level: self.level.checked_add(v.level).unwrap_or(u64::MAX),
                     .. v.clone()
                 }
             }).collect()
     }
 }
+
 pub enum CfgValue {
     CfgValueNone,
     CfgValueInt(i64),
@@ -151,19 +154,20 @@ pub enum CfgValue {
     CfgValueBool(bool),
     CfgValueVec(Vec<CfgValue>),
 }
-pub struct CfgMap(~str, Origin, CfgValue);
+pub struct CfgMap(StrBuf, Origin, CfgValue);
 
 
 #[deriving(Clone)]
-pub type ArgumentValue  = Value<MultiSetValue<~str>>;
+pub type ArgumentValue  = Value<MultiSetValue<StrBuf>>;
 pub type CrateValue     = Value<CrateSourceValue>;
-pub type ArgumentValues = ~[ArgumentValue];
+pub struct ArgumentValues(Vec<ArgumentValue>);
 impl ArgumentValues {
     pub fn new() -> ArgumentValues {
-        ~[]
+        Vec::new()
     }
 
     fn sort(&mut self) {
+        let &ArgumentValues(ref mut inner) = self;
         let mut str_idx = self.arg_order
             .iter()
             .enumerate()
@@ -195,7 +199,7 @@ impl Overridable for ArgumentValues {
         }
 
         let mut iter = args.iter().peekable();
-        loop iter.peek().is_some() {
+        while iter.peek().is_some() {
             let level = get(iter.peek().unwrap()).level;
             while iter.peek().is_some() && get(iter.peek().unwrap()).level == level {
                 let vk_start = iter.clone();
@@ -214,8 +218,9 @@ pub enum Key {
     ToolKey(platform_dep::ToolId),
     LibraryKey(platform_dep::LibraryId),
     RustCfgKey,
-    CodegenKey(~str),
+    CodegenKey(StrBuf),
 }
+#[deriving(Encodable, Decodable, Hash, Clone)]
 pub enum Value {
     ArgValue(ArgumentValues),
     ToolValue(platform_dep::Tool),
@@ -223,13 +228,14 @@ pub enum Value {
 }
 #[deriving(Encodable, Decodable, Hash, Clone)]
 pub struct Overrides {
-    /// the key is the argument mask (typically the program to which the argument applies),
-    /// the value is the override itself.
-    args: HashMap<platform_dep::ToolId, ArgumentValues>,
-    tools: HashMap<platform_dep::ToolId, Path>,
+    overrides_for: Address,
+    // the key is the argument mask (typically the program to which the argument applies),
+    // the value is the override itself.
+    args: HashMap<ToolId, ArgumentValues>,
+    tools: HashMap<ToolId, Path>,
     libraries: HashMap<platform_dep::LibraryId, Path>,
 
-    crates: HashMap<~str, CrateOverrideValue>,
+    crates: HashMap<CrateId, CrateOverrideValue>,
     cfg: Vec<Value<MultiSetValue<CfgValue>>>,
     
     codegen: CodegenOverrides,
@@ -248,10 +254,10 @@ impl Overrides {
         error!("not implemented");
     }
 
-    pub fn override_argument(&mut self, mask: ~str, override: ArgumentValue) {
+    pub fn override_argument(&mut self, tool: ToolId, override: ArgumentValue) {
         self.args.mangle(mask,
                          override,
-                         |_, override| ~[override],
+                         |_, override| vec!(override),
                          |_, &mut overrides, override| {
                 overrides.push(override)
             });
@@ -282,18 +288,18 @@ pub trait Overridable {
     fn override_with(&self, with: &Value<Self>) -> Self;
 }
 
-/// Declare a macro that will define all CodegenOptions fields and parsers all
-/// at once. The goal of this macro is to define an interface that can be
-/// programmatically used by the option parser in order to initialize the struct
-/// without hardcoding field names all over the place.
-///
-/// The goal is to invoke this macro once with the correct fields, and then this
-/// macro generates all necessary code. The main gotcha of this macro is the
-/// cgsetters module which is a bunch of generated code to parse an option into
-/// its respective field in the struct. There are a few hand-written parsers for
-/// parsing specific types of values in this module.
-///
-/// Note all fields are wrapped in an Option
+// Declare a macro that will define all CodegenOptions fields and parsers all
+// at once. The goal of this macro is to define an interface that can be
+// programmatically used by the option parser in order to initialize the struct
+// without hardcoding field names all over the place.
+//
+// The goal is to invoke this macro once with the correct fields, and then this
+// macro generates all necessary code. The main gotcha of this macro is the
+// cgsetters module which is a bunch of generated code to parse an option into
+// its respective field in the struct. There are a few hand-written parsers for
+// parsing specific types of values in this module.
+//
+// Note all fields are wrapped in an Option
 macro_rules! codegen_overrides(
     ($($opt:ident : $t:ty = ($init:expr, $parse:ident, $desc:expr)),* ,) =>
 (
@@ -305,7 +311,7 @@ macro_rules! codegen_overrides(
             $(if self.$opt.is_none() { self.$opt = Some($init); } )*
         }
     }
-    impl Overridable for CodegenOverrides
+    impl Overridable for CodegenOverrides {
         pub fn override_with(&self, overrides: &CodegenOverrides) -> CodegenOverrides {
             CodegenOverrides {
                 $($opt: if overrides.$opt.is_none() { self.$opt.clone() }

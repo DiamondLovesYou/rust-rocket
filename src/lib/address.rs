@@ -19,7 +19,7 @@ use std::to_bytes;
 use std::path;
 use rustc::driver::session::CrateType;
 
-#[deriving(Encodable, Decodable, Clone, Hash, Eq)]
+#[deriving(Encodable, Decodable, Clone, Hash, Eq, Ord, TotalOrd)]
 pub struct Address {
     prefix: Prefix,
     segments: Vec<Segment>,
@@ -61,7 +61,7 @@ impl Address {
         this
     }
 
-    /// rel must be relative. Ignores self's suffix.
+    // rel must be relative. Ignores self's suffix.
     pub fn join(&self, rel: Address) -> Address {
         assert!(rel.is_relative());
         let segments = rel.segments;
@@ -86,10 +86,13 @@ impl default::Default for Address {
 #[deriving(Encodable, Decodable, Clone, Hash)]
 pub enum Suffix {
     EmptySuffix,
-    /// the cargokey corresponds to the last yard of the address
+
+    // the cargokey corresponds to the last yard of the address
     TrainCargoKeySuffix(CargoKey),
     TrainYardSuffix(YardId),
     TrainYardCargoKeySuffix(YardId, CargoKey),
+
+    OverrideSuffix(override::Key),
 }
 impl default::Default for Suffix {
     fn default() -> Suffix {
@@ -123,20 +126,21 @@ pub enum CratePhase {
     CrateLinkPhase,
 }
 impl CLike for CratePhase {
-    fn to_uint(&self) -> {
+    fn to_uint(&self) -> uint {
         match self {
-            CrateSyntaxPhase => 1 << 1,
-            CrateLinkPhase =>   1 << 2,
+            CrateSyntaxPhase => 0,
+            CrateLinkPhase =>   1,
         }
     }
     fn from_uint(i: uint) -> CratePhase {
         match i {
-            1 << 1 => CrateSyntaxPhase,
-            1 << 2 => CrateLinkPhase,
+            0 => CrateSyntaxPhase,
+            1 => CrateLinkPhase,
             _ => unreachable!(),
         }
     }
 }
+pub type CratePhases = enum_set::EnumSet<CratePhase>;
 /// These are mutually exclusive and only make sense at the start of an address
 /// Hence, I moved them to their own enum.
 #[deriving(Encodable, Decodable, Clone, Hash, Eq)]
@@ -147,11 +151,11 @@ pub enum Prefix {
     SubtargetPrefix(TargetId, SubtargetId),
 }
 pub trait Prefixable {
-    pub fn is_relative(&self) -> bool;
-    pub fn is_absolute(&self) -> bool;
-    pub fn is_source(&self) -> bool;
-    pub fn target_id(&self) -> Option<TargetId>;
-    pub fn subtarget_id(&self) -> Option<SubtargetId>;
+    fn is_relative(&self) -> bool;
+    fn is_absolute(&self) -> bool;
+    fn is_source(&self) -> bool;
+    fn target_id(&self) -> Option<TargetId>;
+    fn subtarget_id(&self) -> Option<SubtargetId>;
 }
 impl Prefixable for Prefix {
     pub fn is_relative(&self) -> bool {
@@ -197,11 +201,67 @@ impl Prefixable for Address {
     }
 }
 
-#[deriving(Encodable, Decodable, Clone, Hash)]
+#[deriving(Encodable, Decodable, Clone, Hash, Ord, TotalOrd)]
 pub enum Segment {
-    CrateSegment(CrateId, Option<CrateType>, enum_set::EnumSet<CratePhase>),
+    CrateSegment(CrateId, Option<CrateType>, CratePhases),
     
-    /// A file in a project utilizing an external build system (EBS).
-    /// The path is relative to the root of the project referenced by this address.
+    // A file in a project utilizing an external build system (EBS).
+    // The path is relative to the root of the project referenced in the project
     PathSegment(PathId),
+}
+
+enum Messsage {
+    AddIfRefMsg,
+    // if Some(..), send back the post de-reference ref count.
+    // used during shutdown to assert there are no more refs.
+    DropIfRefMsg(Option<Chan<u64>>),
+
+    GetOverrides(Sender<(Address, Option<Overrides>)>, Address),
+
+}
+#[deriving(Encodable, Decodable, Clone)]
+pub struct AddressEdges {
+    edges: TreeMap<Segment, Origin>,
+}
+struct AddressGraph {
+    verts: Vec<(CrateId, AddressEdges)>,
+    edges: Vec<AddressEdges>,
+}
+// 
+struct Addresser {
+    src: HashMap<CrateId, Segment>,
+    // -l libraries.
+    ebs_libs: HashMap<StrBuf, Path>,
+    graph: AddressGraph,
+}
+impl Addresser {
+    fn save_db(&self) {
+    }
+}
+#[deriving(Clone)]
+pub struct AddresserIf {
+    chan: Sender<Message>,
+}
+impl AddresserIf {
+    pub fn new() -> AddresserIf {
+        
+    }
+    pub fn load(rustb_path: &Path) -> IoResult<AddresserIf> {
+        fail!();
+    }
+
+    pub fn replace_edges(&mut self, vert: Address, edges: AddressEdges) {
+
+    }
+    // Prefer replace_edges to this
+    pub fn add_edge(&mut self, vert: Address, edge: Segment, origin: Origin) {
+        
+    }
+
+    pub fn overrides(&self, addr: Address) -> Future<(Address, Option<Overrides>)> {
+        let (sender, receiver) = channel();
+        let msg = GetOverrides(sender, addr);
+        self.chan.send(msg);
+        Future::from_receiver(receiver)
+    }
 }

@@ -81,7 +81,7 @@ impl Session {
 }
 
 pub struct MasterIf {
-    priv chan: Chan<Message>,
+    chan: Chan<Message>,
 }
 impl MasterIf {
     pub fn new(db: Path) -> MasterIf {
@@ -96,7 +96,7 @@ impl MasterIf {
     }
 }
 pub struct SessionIf {
-    priv chan: Chan<Message>,
+    chan: Chan<Message>,
     addr: address::Address,
 }
 impl clone::Clone for SessionIf {

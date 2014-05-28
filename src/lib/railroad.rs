@@ -20,15 +20,15 @@ use collections::hashmap::HashMap;
 use native::io::fd_t;
 use time;
 
-/// Determines the maximum size of in-memory objects;
-/// types larger than 2 MB are deemed freight.
+// Determines the maximum size of in-memory objects;
+// types larger than 2 MB are deemed freight.
 static OCCUPANCY_CAPACITY: u64 = 1024 * 1024 * 2;
 
 #[deriving(Encodable, Decodable)]
 pub struct Router {
-    priv router_for: address::Address,
-    priv yards: Vec<Yard>,
-    priv names: HashMap<StrId, uint>,
+    router_for: address::Address,
+    yards: Vec<Yard>,
+    names: HashMap<StrId, uint>,
 }
 impl Router {
     pub fn embark(&mut self,
@@ -62,7 +62,7 @@ impl Router {
 
                     let write_to_disk = this_writes
                         .difference(next_reads)
-                        .filter_map(
+                        .filter_map();
                     let read_from_disk = next_reads.difference(this_in_mem);
 
                     let this_combined = this_prep.reads.union(this_prep.writes);
@@ -72,7 +72,7 @@ impl Router {
                     let writes_to_unload;
                     let to_unload = this_combined.difference(next_prep.reads);
 
-                    /// FIXME check for preexistence with UnloadClass
+                    // FIXME check for preexistence with UnloadClass
 
                     Future::from_val((to_load, to_unload))
                 }
@@ -118,9 +118,9 @@ pub enum InputCargo {
 #[deriving(Clone, Hash, Eq)]
 pub enum Diversion {
     NoDiversion,
-    /// use a Vec of zero elements to halt.
+    // use a Vec of zero elements to halt.
     PermDiversion(Vec<Yard>),
-    TempDiversion(~[Yard]),
+    TempDiversion(Vec<Yard>),
 }
 impl default::Default for Diversion {
     fn default() -> Diversion { NoDiversion }
@@ -128,19 +128,19 @@ impl default::Default for Diversion {
 
 #[deriving(Encodable, Decodable, Clone, Eq, Hash)]
 pub enum Classification {
-    /// unused for the time being, until I tackle Yard access classifications
+    // unused for the time being, until I tackle Yard access classifications
     NonStopClass,
 
-    /// read only.
+    // read only.
     ScannedClass,
     
-    /// read/write.
+    // read/write.
     RefineryClass,
 
-    /// the cargo is added to the train. this implies the cargo was
-    /// never on the train to begin with.
+    // the cargo is added to the train. this implies the cargo was
+    // never on the train to begin with.
     LoadClass,
-    /// the cargo is removed from the train and not added back.
+    // the cargo is removed from the train and not added back.
     UnloadClass,
 }
 impl Classification {
@@ -166,10 +166,10 @@ impl Classification {
 
 #[deriving(Encodable, Decodable, Clone)]
 pub struct HumpCache {
-    priv by_cargo_key: HashMap<CargoKey, Classification>,
-    /// here, Classification is either LoadClass (for writes) or UnloadClass (for reads).
-    priv writes:       HashSet<CargoKey>,
-    priv reads:        HashSet<CargoKey>,
+    by_cargo_key: HashMap<CargoKey, Classification>,
+    // here, Classification is either LoadClass (for writes) or UnloadClass (for reads).
+    writes:       HashSet<CargoKey>,
+    reads:        HashSet<CargoKey>,
 }
 impl HumpCache {
     fn new() -> Hump {
@@ -247,7 +247,7 @@ pub struct Yard {
     origin: Origin,
     id: YardId,
     hump: Hump,
-    priv hump_cache: HumpCache,
+    hump_cache: HumpCache,
     industry: Industry,
 }
 pub type Industry = fn(&session::Router, &mut Train) -> Diversion;
@@ -274,32 +274,32 @@ enum CargoKey {
     TypeIdCargoKey(TypeId),
     OverrideCargoKey(override::Key),
 
-    /// build steps/what-have-you
+    // build steps/what-have-you
     DepCargoKey(address::Address),
 
-    /// files
+    // files
     FileCargoKey(address::Address),
 
     // i.e. large files. these are never loaded into memory.
     FreightCargoKey(address::Address),
 
-    /// the Router's main input.
+    // the Router's main input.
     MainInputCargoKey,
 }
 
 enum Car {
     DecoupledCar(Origin),
-    CoupledCar(Origin, ~Any),
-    UnpackingCar(Future<~Any>),
-    UnpackedCar(~Any),
+    CoupledCar(Origin, Box<Any>),
+    UnpackingCar(Future<Box<Any>>),
+    UnpackedCar(Box<Any>),
 }
 #[deriving(Encodable, Decodable, Hash)]
 pub struct Train {
-    priv cars: HashMap<CargoKey, Car>,
-    priv hump: RefCell<Hump>,
+    cars: HashMap<CargoKey, Car>,
+    hump: RefCell<Hump>,
 
-    /// to ease the transition to rustb (since this is used everywhere in rustc).
-    /// heuristics are employed to detect changes.
+    // to ease the transition to rustb (since this is used everywhere in rustc).
+    // heuristics are employed to detect changes.
     rustc_sess: rustc::driver::session::Session,
 }
 impl Train {
@@ -328,7 +328,7 @@ impl Train {
     }
     pub fn couple<T: Car>(&mut self, origin: Origin, car: T) {
         let key = TypeIdCargoKey(type_id::<T>());
-        self.cars.insert_or_update_with(key, ~car as ~Any, |_, old| {
+        self.cars.insert_or_update_with(key, box car as Box<Any>, |_, old| {
                 
             });
     }
@@ -342,12 +342,12 @@ static UNUSED: BorrowFlag = 0;
 static WRITING: BorrowFlag = -1;
 
 pub struct CarRef<'train, TCargo> {
-    priv cargo: TCargo,
-    priv access: Classification,
-    priv flags: ,
+    cargo: TCargo,
+    access: Classification,
+    flags: uint,
 }
 pub struct Ref<'train, 'car, TCargo> {
-    priv parent: &'car CarRef<'train, TCargo>,
+    parent: &'car CarRef<'train, TCargo>,
 }
 impl<'train, 'car, TCargo> Deref<TCargo> for Ref<'train, 'car, TCargo> {
     fn deref<'a>(&'a self) -> &'a TCargo {

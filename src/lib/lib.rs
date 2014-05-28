@@ -32,7 +32,9 @@ extern crate arena;
 extern crate serialize;
 #[phase(syntax, link)]
 extern crate log;
+extern crate green;
 extern crate sqlite = "sqlite3#0.1";
+extern crate bindgen;
 
 pub mod build_crate;
 pub mod cli;
@@ -52,7 +54,8 @@ use rustc::driver::session::CrateType;
 
 pub static BUILD_CRATE_FILENAME: &'static str = "build.rs";
 pub static RUSTB_PATH: &'static str = ".rustb";
-pub static RUSTB_DB_FILENAME: &'static str = "db";
+pub static MSTR_DB_FILENAME: &'static str = "master.db";
+pub static DB_EXT: &'static str = "db";
 pub static IN_TREE_BUILD_SUBPATH: &'static str = "build";
 pub static TARGETS_PATH: &'static str = "target";
 
@@ -83,19 +86,31 @@ pub fn mk_silent_span_handler(cm: @codemap::CodeMap) -> SpanHandler {
     }
 }
 
+static INITIAL_MSTR_DB: &'static [u8] = include_bin!("master.db");
+
+fn create_initial_mstr_db(rustb_path: &Path) -> sqlite::Database {
+    use std::io::{File, Open, ReadWrite};
+    let mstr_db_f = rustb_path.join(MSTR_DB_FILENAME);
+    {
+        let file = File::open_mode(&mstr_db_f, Open, ReadWrite).expect();
+        file.write(INITIAL_MSTR_DB);
+        file.flush();
+    }
+    sqlite::open(format!("file:{}", mstr_db_f))
+            .expect("couldn't create sqlite db!")
+}
+
 #[deriving(Encodable, Decodable)]
 pub struct Build {
-    targets: Vect<Target>,
+    addr: AddresserIf,
+
+    targets: Vec<Target>,
 
     src_path: Path,
     build_path: Path,
-    // in tree builds will have their .rustb/ directly in the source dir,
-    // not in build/.rustb/.
-    rustb_path: Path,
-    targets_path: Path,
     
     build_crate: Box<build_crate::Crate>,
-    
+    db: sqlite::Database,
     
     externs: Option<Vec<Extern>>,
 
@@ -115,20 +130,31 @@ impl Build {
         build
     }
 
-    pub fn configure<TSess: session::Session>(sess: &TSess, config: &session::Configure) -> Build {
+    pub fn configure<TSess: session::Driver>(sess: &TSess,
+                                             config: &session::Configure) -> Build {
+        debug!("configuring `{}` in `{}`",
+               config.src_path.display(),
+               config.build_path.display());
         let build_crate_path = config.src_path.join(BUILD_CRATE_FILENAME);
+        sess.ensure_dir(config.build_path);
+        sess.ensure_dir(config.rustb_path);
+
+        let db = create_initial_mstr_db(&config.rustb_path);
+        assert!(db.exec(format!("INSERT INTO build (src_path) VALUES (\"{}\")",
+                                config.src_path)).expect())
+
         let mut build = Build {
             src_path: config.src_path.clone(),
             build_path: config.build_path.clone(),
             rustb_path: config.rustb_path.clone(),
             
             build_crate: build_crate::new(sess, config.src_path),
+            db: db,
+
             externs: None,
             
             targets: Vec::new(),
         };
-        sess.ensure_dir(build.build_path);
-        sess.ensure_dir(build.rustb_path);
 
         if config.create_default_target() {
             let target_sess = session::Target::new();
@@ -136,23 +162,17 @@ impl Build {
         }
     }
 
-    pub fn load(build_path: Path) -> Option<Build> {
-        let db_path = build_path.join_many([RUSTB_PATH, RUSTB_DB_FILENAME]);
-        // Erlang style: don't program for the fail path, just let it fail.
-        task::try(proc() {
-                use serialize::ebml::reader::{Decoder, Doc};
-                let file = try!({try!(File::open(db_path))}.read_to_end());
-                let mut decoder = Decoder(Doc(file));
-                decode(&mut decoder)
-            }).ok()
+    pub fn load<TSess: session::Driver>(sess: &TSess, path: &Path) -> Option<Build> {
+        let db_path = path.join_many([RUSTB_PATH, RUSTB_DB_FILENAME]);
+        
     }
 
-    pub fn create_target<TSess: session::Session>(&mut self,
-                                                  sess: &TSess,
-                                                  tsess: session::Target) {
+    pub fn create_target(&mut self,
+                         sess: &TSess,
+                         tsess: session::Target) {
         let target = Target {
             name: sess.name,
-            custom_subtargets: ~[],
+            custom_subtargets: Vec::new(),
             build_subtarget: None,
             host_subtarget: None,
             mach: sess.mach,
@@ -201,9 +221,9 @@ impl Configure for Option<Build> {
 
 /// Note Target is also a subtarget; specifically, it's the target target
 pub struct Target {
-    name: ~str,
+    name: StrBuf,
 
-    custom_subtargets: ~[Subtarget],
+    custom_subtargets: Vec<Subtarget>,
 
     build_subtarget: Option<Subtarget>,
     host_subtarget: Option<Subtarget>,
@@ -211,7 +231,7 @@ pub struct Target {
     mach: mach_target::Target,
 
     /// cache
-    priv path: Path,
+    path: Path,
 }
 impl Target {
     pub fn build<TSess: session::Session>(&mut self,
@@ -269,15 +289,15 @@ pub struct Crate {
 }
 
 pub trait ItemUse {
-    /// Is this resource available for use?
+    // Is this resource available for use?
     pub fn is_available(&self) -> bool;
 
-    /// Is this resource locally managed? As in, are we resonsible for rebuilding
-    /// if stale? If not, we only concern ourselfs with its outputs.
+    // Is this resource locally managed? As in, are we resonsible for rebuilding
+    // if stale? If not, we only concern ourselfs with its outputs.
     pub fn is_locally_managed(&self) -> bool;
 
-    /// Are this resource's rebuilds contained? ie do we need to rebuild all items
-    /// depending on this if this is rebuilt?
+    // Are this resource's rebuilds contained? ie do we need to rebuild all items
+    // depending on this if this is rebuilt?
     pub fn are_rebuilds_contained(&self) -> bool;
 
     pub fn with_outputs<U>(&self, f: |&[Item]| -> U) -> U;

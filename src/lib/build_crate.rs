@@ -18,6 +18,8 @@
 use std::path::Path;
 use address::Address;
 use std::comm::{Sender, Receiver};
+use std::unstable::dynamic_lib::DynamicLibrary;
+use rustc;
 
 enum Message {
     
@@ -44,53 +46,51 @@ pub struct Crate {
     path_ts: u64,
 
     id: CrateId,
-    deps: Vec<Address>,
+    deps: TreeSet<CrateId>,
 }
 impl Crate {
     
 }
+pub struct BuildRs {
+    ts: u64,
+    // path to the built dylib:
+    path: Path,
+    dylib: DynamicLibrary,
+
+}
 pub struct BuildCrate {
-    build_rs: Path,
-    build_rs_ts: u64,
-
-    crates: Vec<Crate>,
-
-    target_crates: Option<fn(target: &mut Subtarget)>,
+    crates: Vec<(Crate, Origin)>,
+    
+    parent: Option<BuildCrate>,
 }
-pub struct Inferred {
-    crate_files: Vec<Path>,
-}
-impl Inferred {
-    pub fn new(crate_files: Vec<Path>) -> Inferred {
-        Inferred {
-            crate_files: crate_files,
+impl BuildCrate {
+    pub fn configure<TSess: session::Session>(sess: &TSess) -> BuildCrate {
+        let build_crate_path = src_path.join(BUILD_CRATE_FILENAME);
+        if build_crate_path.exists() {
+            // build the build crate as a dylib
+            // TODO: overrides
+            
+        } else {
+            let crate_files = find_crate_ids_and_paths_in_dir(src_path)
+                .move_iter()
+                .map(|(_, p)| p )
+                .collect();
+            if crate_files.len() == 0 {
+                // FIXME(diamond): report crate parse errors to file
+                sess.fatal("no crates found")
+            }
+
+            BuildCrate {
+                build_dylib: None,
+                build_ts:    None,
+
+            }
         }
     }
 }
 
-pub trait Crate {
-    fn fill_target_session(&self, sess: &mut session::Target);
-
-}
 pub static EXPANSION_YARD_NAME: &'static str = "expansion";
 pub static GATED_FEATURE_CHECKING_YARD_NAME: &'static str = "gated feature checking";
-pub fn new<TSess: session::Session>(sess: &TSess, src_path: &Path) -> ~Crate {
-    let build_crate_path = src_path.join(BUILD_CRATE_FILENAME);
-    if build_crate_path.exists() {
-        fail!("TODO");
-    } else {
-        let crate_files = find_crate_ids_and_paths_in_dir(src_path)
-            .move_iter()
-            .map(|(_, p)| p )
-            .collect();
-        if crate_files.len() == 0 {
-            // FIXME(diamond): report crate parse errors to file
-            sess.fatal("no crates found")
-        }
-
-        ~Inferred::new(crate_files) as ~Crate
-    }
-}
 
 pub fn new_router_for_crate(sess: &session::Session_) -> Router {
     use rustc;
@@ -110,7 +110,7 @@ pub fn new_router_for_crate(sess: &session::Session_) -> Router {
 
         let cfg = match train.by_override(RustCfgKey) {
             RustCfgValue(cfg) => cfg,
-            _ unreachable!(),
+            _ => unreachable!(),
         };
         fn map_cfg(v: CfgMap) -> @ast::MetaItem {
             let (name, _, value) = v;
