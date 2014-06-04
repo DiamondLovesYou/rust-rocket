@@ -15,17 +15,17 @@
 // You should have received a copy of the GNU Lesser General Public License
 // along with Rust Rocket. If not, see <http://www.gnu.org/licenses/>.
 
-#![crate_id = "rocket"]
+#![crate_id = "rocket#0.1"]
 #![comment = "The Rust project builder"]
 #![license = "GNU/LGPLv3"]
-#![crate_type = "bin"]
 #![crate_type = "dylib"]
 #![crate_type = "rlib"]
+
+#![feature(phase, managed_boxes, struct_variant)]
 
 extern crate syntax;
 extern crate rustc;
 extern crate std;
-extern crate getops;
 extern crate glob;
 extern crate term;
 extern crate arena;
@@ -36,13 +36,6 @@ extern crate green;
 extern crate sqlite = "sqlite3#0.1";
 extern crate bindgen;
 
-pub mod build_crate;
-pub mod cli;
-pub mod toolchain_wrap;
-pub mod user;
-pub mod session;
-pub mod platform_dep;
-
 use build_crate::BuildCrate;
 
 use syntax::ast::{CrateConfig, Name};
@@ -51,6 +44,12 @@ use std::path::Path;
 use std::send_str::SendStr;
 use std::rc::{Rc, Weak};
 use rustc::driver::session::CrateType;
+
+pub mod build_crate;
+pub mod toolchain_wrap;
+pub mod user;
+pub mod driver;
+pub mod platform_dep;
 
 pub static BUILD_CRATE_FILENAME: &'static str = "build.rs";
 pub static RUSTB_PATH: &'static str = ".rustb";
@@ -74,10 +73,8 @@ impl Emitter for SilentEmitter {
 }
 
 pub fn mk_silent_handler() -> Handler {
-    Handler {
-        err_count: Cell::new(0),
-        emit: box SilentEmitter,
-    }
+    use syntax::diagnostic::mk_handler;
+    mk_handler(box SilentEmitter)
 }
 pub fn mk_silent_span_handler(cm: @codemap::CodeMap) -> SpanHandler {
     SpanHandler {
@@ -219,9 +216,9 @@ impl Configure for Option<Build> {
     }
 }
 
-/// Note Target is also a subtarget; specifically, it's the target target
+// Note Target is also a subtarget; specifically, it's the target's target
 pub struct Target {
-    name: StrBuf,
+    name: String,
 
     custom_subtargets: Vec<Subtarget>,
 
@@ -230,7 +227,7 @@ pub struct Target {
 
     mach: mach_target::Target,
 
-    /// cache
+    // cache
     path: Path,
 }
 impl Target {
@@ -251,20 +248,15 @@ pub struct Subtarget {
 
     triple: mach_target::Target,
 
-    crates: ~[],
+    crates: Vec<Address>,
 }
 impl Subtarget {
-    fn new() -> Subtarget {
-        Subtarget{}
-    }
-
-    
 }
 
 pub struct Extern {
     crate_id: crateid::CrateId,
     dir: Path,
-    build_crate: ~build_crate::Crate,
+    build_crate: build_crate::Crate,
 }
 
 pub enum DebuggingKey {
@@ -290,17 +282,17 @@ pub struct Crate {
 
 pub trait ItemUse {
     // Is this resource available for use?
-    pub fn is_available(&self) -> bool;
+    fn is_available(&self) -> bool;
 
     // Is this resource locally managed? As in, are we resonsible for rebuilding
     // if stale? If not, we only concern ourselfs with its outputs.
-    pub fn is_locally_managed(&self) -> bool;
+    fn is_locally_managed(&self) -> bool;
 
     // Are this resource's rebuilds contained? ie do we need to rebuild all items
     // depending on this if this is rebuilt?
-    pub fn are_rebuilds_contained(&self) -> bool;
+    fn are_rebuilds_contained(&self) -> bool;
 
-    pub fn with_outputs<U>(&self, f: |&[Item]| -> U) -> U;
+    fn with_outputs<U>(&self, f: |&[Item]| -> U) -> U;
 }
 
 pub enum Branches {
@@ -316,7 +308,10 @@ pub enum Source_ {
 pub enum Item_ {
     ToolItem(&'static Source),
     StaticItem(&'static str),
-    BranchedItem(br: &'static Branches, cond: &'static Item),
+    BranchedItem {
+        br: &'static Branches,
+        cond: &'static Item
+    },
 }
 
 pub struct GraphedNode<T> {
@@ -329,14 +324,11 @@ pub struct GraphedNode<T> {
     children: uint,
     parents:  uint,
 }
-pub struct StaleNode<T> {
-    
-}
 
 pub enum Locus_ {
-    /// Finds all crates in the immediate sub-directory.
+    // Finds all crates in the immediate sub-directory.
     DirectoryLocus(SendStr),
-    /// Specify 
+    // Specify 
     ExplicitLocus(SendStr),
 }
 pub type Locus = GraphedNode<Locus_>;
@@ -351,8 +343,7 @@ pub struct Crate_ {
 }
 pub type Crate = GraphedNode<Crate_>;
 
-pub struct MachineTarget(~str);
-
+pub struct MachineTarget(String);
 
 pub enum PreferenceLevel {
     UserPrefLevel,

@@ -15,6 +15,15 @@
 // You should have received a copy of the GNU Lesser General Public License
 // along with Rust Rocket. If not, see <http://www.gnu.org/licenses/>.
 
+#![crate_id = "rocket#0.1"]
+#![comment = "The Rust project builder"]
+#![license = "GNU/LGPLv3"]
+#![crate_type = "bin"]
+
+extern crate rocket;
+extern crate rustc;
+extern crate getopts;
+
 use getopts::{optopt, optmulti, optflag, optflagopt};
 use getopts;
 use rustc;
@@ -69,20 +78,17 @@ impl BuildDir for path::Path {
     }
 }
 
-struct SessionData {
-}
+struct SessionData;
 #[deriving(Clone)]
-pub struct SessionIF {
-    
-}
+pub struct SessionIf;
 
-pub fn top_level_opts() -> ~[getopts::OptGroup] {
-    ~[optflag("h", "help", "This help message"),
-      optflag("c", "", "Emulate rustc (see rustb -c -h for more info)"),
+pub fn top_level_opts() -> Vec<getopts::OptGroup> {
+    vec!(optflag("h", "help", "This help message"),
+         optflag("c", "", "Emulate rustc (see rustb -c -h for more info)"),
 
-      /// All flags from now on are only designed for developers/builders (people, specifically).
-      optflag("build", "", "Build all of the crates in a source dir OR \
-              build a configured dir. ")]
+         // All flags from now on are only designed for developers/builders (people, specifically).
+         optflag("build", "", "Build all of the crates in a source dir OR \
+                 build a configured dir. "))
 }
 
 pub fn print_usage(_cli_name: &str) {
@@ -142,9 +148,6 @@ fn select_word(flagness: bool, word: uint) -> &'static str {
 pub struct OptDirectory {
     tag: &'static str,
     
-}
-pub struct Opt {
-    tag: &'static
 }
 
 #[cfg(target_os = "freebsd")]

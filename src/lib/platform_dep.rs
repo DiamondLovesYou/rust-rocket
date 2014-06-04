@@ -60,7 +60,7 @@ pub struct Tool {
     tool: ToolId,
     path: Path,
     /// lazily initialized
-    priv version_str: RefCell<Option<~str>>,
+    version_str: RefCell<Option<~str>>,
 }
 
 pub trait ToolInfo {

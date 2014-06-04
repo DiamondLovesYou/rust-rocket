@@ -90,8 +90,8 @@ impl<'a> Invocation<'a> {
     pub fn new(state: &str,
                print_invocation: bool,
                tool: &str,
-               opts: &'a [~str]) -> Invocation<'a> {
-        Invocation<'a> {
+               opts: &'a [String]) -> Invocation<'a> {
+        Invocation {
             state_file: Path::new(state),
             print_invocation: print_invocation,
             tool: from_str(tool).expect("unknown tool specified; this is more than likely a bug"),
@@ -103,7 +103,7 @@ impl<'a> Invocation<'a> {
         // don't try block this; if we can't read the state file, we really do need to fail!().
         let state = {
             use serialize::ebml::reader::{Decoder, Doc};
-            let state_bytes = if_ok!({if_ok!(File::open(self.state_file))}.read_to_end());
+            let state_bytes = try!({try!(File::open(self.state_file))}.read_to_end());
             let mut decoder = Decoder(Doc(state_bytes));
             decode(&mut decoder)
         };

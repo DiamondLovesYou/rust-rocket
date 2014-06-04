@@ -15,6 +15,5 @@
 // You should have received a copy of the GNU Lesser General Public License
 // along with Rust Rocket. If not, see <http://www.gnu.org/licenses/>.
 
-// User specific settings.
-
-
+pub mod session;
+pub mod error_codes;

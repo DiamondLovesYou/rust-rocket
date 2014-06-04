@@ -96,7 +96,7 @@ pub fn new_router_for_crate(sess: &session::Session_) -> Router {
     use rustc;
     use rustc::front;
     
-    let parse_input_yard = Yard::new(~"parse input",
+    let parse_input_yard = Yard::new(&"parse input".to_strbuf(),
                                      DefaultOrigin,
                                      parse_input_hump,
                                      parse_input);
@@ -209,12 +209,12 @@ pub fn new_router_for_crate(sess: &session::Session_) -> Router {
         NoDiversion
     }
 
-    /// Phase 3:
+    // Phase 3:
 
     fn find_link_phase_crates(train: &mut Train) {
-        /// now that we finished expanding && striping configuration items,
-        /// find the crates we depend on at link time and inform the right
-        /// interface so it may begin building if necessary.
+        // now that we finished expanding && striping configuration items,
+        // find the crates we depend on at link time and inform the right
+        // interface so it may begin building if necessary.
     }
 }
 enum ExternDepEntry {

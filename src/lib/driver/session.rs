@@ -185,9 +185,9 @@ impl FreshnessIf {
     fn run_db(port: &Port<FreshnessMessage>,
               logger: &BackendLoggerIf,
               db_path: &Path) -> bool {
-        let mut (stale_map,
-                 dragnetting,
-                 tracking_map) = match FreshnessDb::load(logger, db_path) {
+        let (mut stale_map,
+             mut dragnetting,
+             mut tracking_map) = match FreshnessDb::load(logger, db_path) {
             Some(mut db) => match db.find_stale_files(logger) {
                 Some(stale_map) => (stale_map, false, db.tracking),
                 None => (HashMap::new(), true, db.tracking),
@@ -238,7 +238,7 @@ impl FreshnessIf {
                             let queried = tracking_set.intersection(queried);
                             let result = queried
                                 .move_iter()
-                                .any(|p| stale_map.contains_key_equiv(p) )
+                                .any(|p| stale_map.contains_key_equiv(p) );
                             ret.try_send(result);
                         }
                     }
@@ -343,30 +343,39 @@ impl FreshnessIf {
     }
 }
 
-/// Defines the interface to session data managed on a per target basis.
-pub struct TargetIf {
-}
+// Defines the interface to session data managed on a per target basis.
+pub struct TargetIf;
 
 pub trait Driver {
     fn fatal(&self, origin: Origin, msg: &str) -> !;
     fn err(&self, origin: Origin, msg: &str);
     fn warn(&self, origin: Origin, msg: &str);
     fn info(&self, origin: Origin, msg: &str);
+    fn abort_if_errors(&self);
 }
 
 #[deriving(Clone)]
 pub struct Session_ {
-    priv codemapper: CodeMapperIf,
-    priv freshness:  FreshnessIf,
-    priv dep:        DepIf,
-    priv workcache:  WorkCacheIf,
+    codemapper: CodeMapperIf,
+    freshness:  FreshnessIf,
+    dep:        DepIf,
+    workcache:  WorkCacheIf,
 }
-pub trait Session {
-    fn codemapper(&self) -> CodeMapperIf;
-    fn freshness(&self) -> FreshnessIf;
-    fn dep(&self) -> DepIf;    
+impl Session {
+    pub fn codemapper<'a>(&'a self) -> &'a CodeMapperIf {
+        self.codemapper
+    }
+    pub fn freshness<'a>(&'a self) -> &'a FreshnessIf {
+        self.freshness
+    }
+    pub fn dep<'a>(&'a self) -> &'a DepIf {
+        self.dep
+    }
+    pub fn workcache<'a>(&'a self) -> &'a WorkCacheIf {
+        self.workcache
+    }
 
-    fn ensure_dir(&self, dir: &Path) {
+    pub fn ensure_dir(&self, dir: &Path) {
         if dir.exists() {
             match io::fs::lstat(dir) {
                 Ok(FileStat { perm: perm, .. }) if perm & io::UserRWX == io::UserRWX => {},
@@ -398,32 +407,35 @@ pub trait Session {
         }
     }
 }
-impl Session for Session_ {
-    fn fatal(&self, msg: &str) -> !;
-    fn err(&self, msg: &str);
-    fn warn(&self, msg: &str);
-
-    fn target_id(&self) -> TargetId;
-    fn subtarget_id(&self) -> SubtargetId;
+impl Driver for Session_ {
+    fn fatal(&self, origin: Origin, msg: &str) -> ! {
+        
+    }
+    fn err(&self, origin: Origin, msg: &str) {
+    }
+    fn warn(&self, origin: Origin, msg: &str) {
+    }
+    fn info(&self, origin: Origin, msg: &str) {
+    }
 }
 #[deriving(Clone)]
 pub struct Router {
     addr: address::Address,
 
-    priv diag:   diagnostics::SessionIf,
-    priv dep:    dep::SessionIf,
-    priv wc:     workcache::SessionIf,
-    priv build:  build_crate::SessionIf,
+    diag:   diagnostics::SessionIf,
+    dep:    dep::SessionIf,
+    wc:     workcache::SessionIf,
+    build:  build_crate::SessionIf,
 }
 impl Router {
     pub fn incr_yard(&mut self, yard: YardId) {
         self.address = self.address.with_yard_suffex(yard);
     }
-    /// injects a dep to another yard.
+    // injects a dep to another yard.
     pub fn inject_crate_dep(&self, yard: YardId, dep: Address) {
-        self.dep.inject_crate_dep(self.addr.clone(), )
+        self.dep.inject_crate_dep(self.addr.clone(), yard, dep)
     }
-    /// reports a dep of this yard.
+    // reports a dep of this yard.
     pub fn report_crate_dep(&self, krate: CrateId, phase: CratePhase) {
         
     }
@@ -449,19 +461,22 @@ pub struct Configure {
     default_target: Option<Target>,
 }
 pub struct Target {
-    name: StrBuf,
+    name: String,
     mach: mach_target::Target,
     
 }
 impl Target {
     pub fn new() -> Target {
+        
+    }
+}
+impl Default for Target {
+    fn default() -> Target {
         Target {
-            name: ~"default",
+            name: "default".to_string(),
             mach_target: mach_target::get_host_triple()
         }
     }
-    
-    
 }
 
 pub fn find_crates_in_dir<TSess: Session>(_sess: &TSess, cwd: &Path) -> io::IoResult<~[Crate]> {
