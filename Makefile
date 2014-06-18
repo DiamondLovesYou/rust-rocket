@@ -25,14 +25,14 @@ BINDGEN ?= $(shell readlink -f src/bindgen)
 SQLITE  ?= $(shell readlink -f src/sqlite)
 
 BUILD_OUT ?= $(shell readlink -f .)/build
-RUSTFLAGS += --out-dir=$(BUILD_OUT)
+RUSTFLAGS += --out-dir=$(BUILD_OUT) -L $(BUILD_OUT)
 
-LIBROCKET_OUTS := $(shell $(RUSTC) --crate-file-name src/lib/lib.rs)
-ROCKET_OUT := $(shell $(RUSTC) --crate-file-name src/bin/main.rs)
+rwildcard = $(foreach d,$(wildcard $1*),$(call rwildcard,$d/,$2) $(filter $(subst *,%,$2),$d))
 
 .DEFAULT_GOAL := all
-all: 	$(BUILD_OUT)/$(ROCKET_OUT) \
-	$(BUILD_OUT)/$(word 1,$(LIBROCKET_OUTS))
+all: $(BUILD_OUT) $(BUILD_OUT)/rocket.stamp
+clean:
+	touch Makefile
 
 $(BUILD_OUT):
 	mkdir -p $(BUILD_OUT)
@@ -40,27 +40,31 @@ $(BUILD_OUT):
 define DEP_RULES
 # $(1) == the dep var prefix (ie BINDGEN)
 # $(2) == the dep name
-# $(3) == lib.rs, relative to the dep's root (ie $$(1)/)
+# $(3) == source dir, relative to the dep's root (ie $$($(1))/)
 
--include $$(BUILD_OUT)/lib$(2).d
-
-$(1)_OUT := $$(shell $$(RUSTC) --crate-type=dylib --crate-file-name $$($(1))/$(3))
-
-$$(BUILD_OUT)/$$($(1)_OUT): $$(BUILD_OUT) Makefile $$(RUSTC)
-	$$(RUSTC) $$(RUSTFLAGS) $$($(1))/$(3) --dep-info $$(BUILD_OUT)/lib$(2).d
-
-DEPS += $$(BUILD_OUT)/$$($(1)_OUT)
+$$(BUILD_OUT)/$(2).stamp: $$($(1))/$(3)/lib.rs                 \
+			  $$(call rwildcard,$$($(1))$(3),*.rs) \
+			  Makefile $$(RUSTC)
+	$$(RUSTC) $$(RUSTFLAGS) $$< --crate-type=dylib
+	touch $$@
+DEPS += $$(BUILD_OUT)/$(2).stamp
 
 endef
 
-$(eval $(call DEP_RULES,BINDGEN,bindgen,lib.rs))
-$(eval $(call DEP_RULES,SQLITE,sqlite,src/sqlite3/lib.rs))
+$(eval $(call DEP_RULES,BINDGEN,bindgen,))
+$(eval $(call DEP_RULES,SQLITE,sqlite,src/sqlite3))
 
--include $(BUILD_OUT)/librocket.d
+$(BUILD_OUT)/librocket.stamp: src/lib/lib.rs                 \
+			      $(call rwildcard,src/lib,*.rs) \
+			      Makefile $(BUILD_OUT) $(DEPS)  \
+			      $(RUSTC)
+	$(RUSTC) $(RUSTFLAGS) $<
+	touch $@
 
-$(BUILD_OUT)/$(word 1,$(LIBROCKET_OUTS)): src/lib/lib.rs Makefile $(BUILD_OUT) $(DEPS)
-	$(RUSTC) $(RUSTFLAGS) --dep-info $(BUILD_OUT)/librocket.d $<
-
-$(BUILD_OUT)/$(ROCKET_OUT): src/bin/main.rs Makefile $(BUILD_OUT) \
-			    $(BUILD_OUT)/$(word 1,$(LIBROCKET_OUTS))
-	$(RUSTC) $(RUSTFLAGS) --crate-type=bin -o $@ $<
+$(BUILD_OUT)/rocket.stamp: src/bin/main.rs                \
+			   $(call rwildcard,src/bin,*.rs) \
+			   Makefile $(BUILD_OUT)          \
+			   $(BUILD_OUT)/librocket.stamp   \
+			   $(RUSTC)
+	$(RUSTC) $(RUSTFLAGS) $<
+	touch $@
