@@ -16,12 +16,14 @@
 // along with Rust Rocket. If not, see <http://www.gnu.org/licenses/>.
 
 use std::path::Path;
+use std::collections::HashMap;
+use std::cell::RefCell;
 
 #[deriving(Encodable, Decodable)]
 pub struct Session {
-    tools: HashMap<Tool_, Path>,
+    tools: HashMap<ToolId, Path>,
 
-    libs: HashMap<~str, Path>,
+    libs: HashMap<String, Path>,
 }
 #[deriving(Encodable, Decodable)]
 pub enum CCompilerType {
@@ -60,12 +62,12 @@ pub struct Tool {
     tool: ToolId,
     path: Path,
     /// lazily initialized
-    version_str: RefCell<Option<~str>>,
+    version_str: RefCell<Option<String>>,
 }
 
 pub trait ToolInfo {
-    fn tool(&self) -> Tool_;
-    fn version_str(&self) -> ~str;
+    fn tool(&self) -> ToolId;
+    fn version_str(&self) -> String;
 }
 
 

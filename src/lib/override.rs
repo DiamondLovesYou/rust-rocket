@@ -16,21 +16,25 @@
 // along with Rust Rocket. If not, see <http://www.gnu.org/licenses/>.
 
 use std::path::Path;
-use std::cmp::TotalOrd;
 use std::clone::Clone;
-use std::default;
+use std::{default, cmp, hash};
 use serialize::{Encodable, Decodable};
 use std::io::Writer;
-use collection::hashmap::{HashMap, HashSet};
+use std::collections::hashmap::{HashMap, HashSet};
+use std::str::MaybeOwned;
+use syntax::codemap;
+use std::u64;
+use url;
 
 use platform_dep::ToolId;
+use address::Address;
 
 pub type Level = u64;
 
 
 #[deriving(Encodable, Decodable)]
 struct Session {
-    by_addr: HashMap<address::Address, Overrides>,
+    by_addr: HashMap<Address, Overrides>,
 }
 
 /// The origin for an override
@@ -40,48 +44,29 @@ pub enum Origin {
     CliOrigin,
     SpanOrigin(codemap::Span),
 }
+
 #[deriving(Encodable, Decodable)]
-pub enum MultiSetKind {
+pub enum MultiSetOp<T> {
     AddMSK,
     RemoveMSK,
+    ReplaceMSK(TagOrValueKey<T>),
 }
-#[deriving(Encodable, Decodable, Eq, Clone, Hash, Ord, TotalOrd)]
+
+#[deriving(Encodable, Decodable, Eq, Clone, Hash, Ord, PartialEq)]
+pub enum TagOrValueKey<T> {
+    TaggedKey(String),
+    ValueKey(T),
+}
+
+#[deriving(Encodable, Decodable, Eq, Clone, Hash, Ord, PartialEq)]
 pub enum MultiSetPosition<T> {
-    DontCareMSP,
-    BeforeMSP(T),
-    AfterMSP(T),
+    BeforeMSP(TagOrValueKey),
+    AfterMSP(TagOrValueKey),
 }
 #[deriving(Encodable, Decodable)]
-pub enum MultiSetValue<T> {
-    ReplaceMultiSetValue(MultiSetKind, T, T),
-    
-    FlagMultiSetValue(MultiSetKind, MultiSetPosition<T>, T),
-}
-impl<T: cmp::TotalOrd> cmp::TotalOrd for MultiSetValue<T> {
-    fn cmp(&self, other: &MultiSetValue<T>) -> cmp::Ordering {
-        match match self {
-            &ReplaceMultiSetValue(_, ref key, _) |
-                &FlagMultiSetValue(_, ref key) => {
-                match other {
-                    &ReplaceMultiSetValue(_, ref key2, _) |
-                        &FlagMultiSetValue(_, _, ref key2) => key.cmp(key2)
-                }
-            }
-        } {
-            cmp::Equal => {
-                match self {
-                    &ReplaceMultiSetValue(RemoveMultiSetKind, _, _) => {
-                        match other {
-                            &ReplaceMultiSetValue(RemoveMultiSetKind, _, _) => Equal,
-                            _ => Less,
-                        }
-                    }
-                    _ => Greater,
-                }
-            }
-            order => order,
-        }
-    }
+pub struct MultiSet<T> {
+    op: MultiSetOp<T>,
+    pos: Option<MultiSetPosition<T>>,
 }
 
 #[deriving(Encodable, Decodable)]
@@ -90,25 +75,25 @@ pub enum CrateSource {
     // like a -L path
     DirCrateSource(Path),
 
-    RepoCrateSource(repo::Url),
+    RepoCrateSource(url::Url),
 }
 #[deriving(Encodable, Decodable, Clone, Hash)]
-pub struct Value<T> {
+pub struct ValueOrigin<T> {
     origin: Origin,
     level:  u64,
     value:  T,
 }
-impl<T: Clone> Clone for Value<T> {
-    fn clone(&self) -> Value<T> {
-        Value {
+impl<T: Clone> Clone for ValueOrigin<T> {
+    fn clone(&self) -> ValueOrigin<T> {
+        ValueOrigin {
             origin: self.origin.clone(),
             level:  self.level,
             value:  self.value.clone(),
         }
     }
 }
-impl<T: cmd::TotalOrd> cmp::TotalOrd for Value<T> {
-    fn cmp(&self, other: &Value<T>) -> cmp::Ordering {
+impl<T: cmp::Ord> cmp::Ord for ValueOrigin<T> {
+    fn cmp(&self, other: &ValueOrigin<T>) -> cmp::Ordering {
         if self.level == other.level {
             self.value.cmp(other.value)
         } else {
@@ -116,7 +101,7 @@ impl<T: cmd::TotalOrd> cmp::TotalOrd for Value<T> {
         }
     }
 }
-impl<S: Writer, T: hash::Hash> Hash<S> for Value<T> {
+impl<S: Writer, T: hash::Hash> hash::Hash<S> for ValueOrigin<T> {
     fn hash(&self, state: &mut S) {
         self.level.hash(state);
         self.value.hash(state);
@@ -127,39 +112,39 @@ pub trait HasEmbedded<T> {
     fn propagate_level(&self) -> T;
 }
 
-impl<T> HasEmbedded<Value<T>> for Value<Value<T>> {
-    pub fn propagate_level(&self) -> Value<T> {
-        Value {
+impl<T> HasEmbedded<ValueOrigin<T>> for ValueOrigin<ValueOrigin<T>> {
+    pub fn propagate_level(&self) -> ValueOrigin<T> {
+        ValueOrigin {
             level: self.level.checked_add(self.value.level).unwrap_or(u64::MAX),
             .. self.value.clone()
         }
     }
 }
-impl<T> HasEmbedded<Vec<Value<T>>> for Value<Vec<Value<T>>> {
-    pub fn propagate_level(&self) -> Vec<Value<T>> {
+impl<T> HasEmbedded<Vec<ValueOrigin<T>>> for ValueOrigin<Vec<ValueOrigin<T>>> {
+    pub fn propagate_level(&self) -> Vec<ValueOrigin<T>> {
         self.value.iter().map(|v| {
-                Value {
-                    level: self.level.checked_add(v.level).unwrap_or(u64::MAX),
-                    .. v.clone()
-                }
-            }).collect()
+            ValueOrigin {
+                level: self.level.checked_add(v.level).unwrap_or(u64::MAX),
+                .. v.clone()
+            }
+        }).collect()
     }
 }
 
 pub enum CfgValue {
     CfgValueNone,
     CfgValueInt(i64),
-    CfgValueStr(SendStr),
+    CfgValueStr(MaybeOwned<'static>),
     CfgValueFloat(f64),
     CfgValueBool(bool),
     CfgValueVec(Vec<CfgValue>),
 }
-pub struct CfgMap(StrBuf, Origin, CfgValue);
+pub struct CfgMap(String, Origin, CfgValue);
 
 
 #[deriving(Clone)]
-pub type ArgumentValue  = Value<MultiSetValue<StrBuf>>;
-pub type CrateValue     = Value<CrateSourceValue>;
+pub type ArgumentValue  = ValueOrigin<MultiSet<String>>;
+pub type CrateValue     = ValueOrigin<CrateSource>;
 pub struct ArgumentValues(Vec<ArgumentValue>);
 impl ArgumentValues {
     pub fn new() -> ArgumentValues {
@@ -182,12 +167,12 @@ impl ArgumentValues {
     }
 }
 impl Overridable for ArgumentValues {
-    fn override_with(&self, o: &Value<ArgumentValues>) -> ArgumentValues {
+    fn override_with(&self, o: &ValueOrigin<ArgumentValues>) -> ArgumentValues {
         let mut new = ArgumentValues::new();
         let o = o.propagate_level();
         let mut args = self
             .iter()
-            .chain(o.iter()).
+            .chain(o.iter())
             .enumerate()
             .map(|&(i, arg)| (arg, i) )
             .collect();
@@ -205,25 +190,26 @@ impl Overridable for ArgumentValues {
                 let vk_start = iter.clone();
                 let vk_end = vk_start.clone().nth();
                 let (arg, pos) = iter.next().unwrap();
-                match arg.value {
-                    ReplaceMultiSetValue(AddMultiSetKind, ..) => {}
-                }
+                /*match arg.value {
+                    
+                }*/
             }
         }
     }
 }
 #[deriving(Encodable, Decodable, Hash, Clone, Eq)]
-pub enum Key {
-    ArgKey(platform_dep::ToolId),
-    ToolKey(platform_dep::ToolId),
-    LibraryKey(platform_dep::LibraryId),
-    RustCfgKey,
-    CodegenKey(StrBuf),
+pub enum Override {
+    ArgOverride(ToolId),
+    ToolOverride(ToolId, Path),
+    CrateOverride(CrateId),
+    RustCfgOverride,
+    CodegenOverride(String),
 }
+
 #[deriving(Encodable, Decodable, Hash, Clone)]
 pub enum Value {
     ArgValue(ArgumentValues),
-    ToolValue(platform_dep::Tool),
+    ToolValue(Tool),
     RustCfgValue(Vec<CfgMap>),
 }
 #[deriving(Encodable, Decodable, Hash, Clone)]
@@ -233,16 +219,16 @@ pub struct Overrides {
     // the value is the override itself.
     args: HashMap<ToolId, ArgumentValues>,
     tools: HashMap<ToolId, Path>,
-    libraries: HashMap<platform_dep::LibraryId, Path>,
+    crates: HashMap<CrateId, Path>,
 
     crates: HashMap<CrateId, CrateOverrideValue>,
-    cfg: Vec<Value<MultiSetValue<CfgValue>>>,
+    cfg: Vec<ValueOrigin<MultiSetValue<CfgValue>>>,
     
     codegen: CodegenOverrides,
 }
 impl Overrides {
     pub fn new() -> Overrides {
-        Overrides{
+        Overrides {
             args: HashMap::new(),
             crates: HashMap::new(),
             codegen: CodegenOverrides::new(),
@@ -250,7 +236,8 @@ impl Overrides {
     }
 
     pub fn flatten(&mut self) {
-        // this is specifically not unimplemented b/c this operation is only an optimization.
+        // this is specifically not unimplemented b/c this operation is only an
+        // optimization. 
         error!("not implemented");
     }
 
@@ -262,7 +249,7 @@ impl Overrides {
                 overrides.push(override)
             });
     }
-    pub fn override_crate(&mut self, crate_: CrateOverrideValue) {
+    pub fn override_crate(&mut self, krate: CrateOverrideValue) {
         
     }
 }
@@ -377,32 +364,3 @@ macro_rules! codegen_overrides(
 
     }
 ) )
-
-codegen_overrides!(
-    target_cpu: ~str = (~"generic", parse_string,
-        "select target processor (llc -mcpu=help for details)"),
-    target_feature: ~str = (~"", parse_string,
-        "target specific attributes (llc -mattr=help for details)"),
-    passes: ~[~str] = (~[], parse_list,
-        "a list of extra LLVM passes to run (space separated)"),
-    save_temps: bool = (false, parse_bool,
-        "save all temporary output files during compilation"),
-    cross_path: Option<~str> = (None, parse_opt_string,
-        "the path to the Android NDK"),
-    rpath: bool = (true, parse_bool,
-        "disables setting the rpath in libs/exes"),
-    prepopulate_passes: bool = (true, parse_bool,
-        "don't pre-populate the pass manager with a list of passes"),
-    vectorize_loops: bool = (true, parse_bool,
-        "don't run the loop vectorization optimization passes"),
-    vectorize_slp: bool = (true, parse_bool,
-        "don't run LLVM's SLP vectorization pass"),
-    soft_float: bool = (false, parse_bool,
-        "generate software floating point library calls"),
-    gen_crate_map: bool = (false, parse_bool,
-        "force generation of a toplevel crate map"),
-    prefer_dynamic: bool = (false, parse_bool,
-        "prefer dynamic linking to static linking"),
-    integrated_as: bool = (true, parse_bool,
-        "use an external assembler rather than LLVM's integrated one"),
-)

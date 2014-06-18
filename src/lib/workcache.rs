@@ -15,12 +15,12 @@
 // You should have received a copy of the GNU Lesser General Public License
 // along with Rust Rocket. If not, see <http://www.gnu.org/licenses/>.
 
-use std::comm::{Port, Chan};
+use std::comm::{Receiver, Sender};
 use std::io;
-use std::io::{PortReader, ChanWriter, IoResult};
+use std::io::{ChanReader, ChanWriter, IoResult};
 use std::hash::sip::SipState;
 
-use address::SourceAddress;
+use address::Address;
 use override::Overrides;
 
 // singleton task POV
@@ -66,7 +66,7 @@ struct Entry {
     hash: u64,
 }
 static CACHE_ARTIFACT_SUBPATH: &'static str = ".cache";
-/// Make sure 
+// Make sure 
 static DB_VERSION: u64 = 0;
 #[deriving(Encodable, Decodable)]
 struct Db {
@@ -283,7 +283,7 @@ struct HelperWork {
     own: Option<HelperIf>,
 }
 impl HelperWork {
-    /// Predicate: output file is closed
+    // Predicate: output file is closed
     fn ret(&self, sess: &mut HelperSession, err: Option<IoError>) {
         match err {
             Some(e) => {
@@ -302,7 +302,7 @@ impl HelperWork {
                             hash: sess.hasher.result(),
                             path: self.path.clone(),
                     }, false)
-                }
+                };
                 self.ret.send(HelperFinishedCachingMsg(Ok((self.key, entry))));
             }
         }
@@ -313,8 +313,8 @@ impl HelperWork {
             let fout = match File::open_mode(self.path, Open, Write) {
                 Ok(fout) => fout,
                 e => {
-                    self.ret(sess, Some(e))
-                        return;
+                    self.ret(sess, Some(e));
+                    return;
                 }
             };
             let mut size: i64 = 0;
@@ -410,7 +410,7 @@ impl clone::Clone for SessionIf {
     fn clone(&self) -> SessionIf {
         self.chan.send(AddIfRefMsg);
         SessionIf {
-            chan: self.chan.clone();
+            chan: self.chan.clone(),
         }
     }
 }

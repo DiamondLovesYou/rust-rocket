@@ -15,32 +15,8 @@
 // You should have received a copy of the GNU Lesser General Public License
 // along with Rust Rocket. If not, see <http://www.gnu.org/licenses/>.
 
-use syntax::diagnostic;
-use std::comm::{Chan, Port};
+// Stuff related to toolchain impersonation.
+// TODO
 
-struct Session {
-}
-impl Session {
-    fn task(port: Port<SessionMessage>) {
-        
-        for msg in port.iter() {
-            
-        }
-
-
-    }
-    fn new() -> SessionIf {
-        let (port, chan) = Chan::new();
-        spawn(proc() {
-                Session::task(port)
-            })
-        SessionIf {
-            chan: chan,
-        }
-    }
-}
-
-#[deriving(Clone)]
-pub struct SessionIf {
-    priv chan: Chan<SessionMessage>,
-}
+//pub mod invocation;
+//pub mod tool;

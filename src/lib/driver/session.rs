@@ -17,89 +17,42 @@
 
 use std::path::Path;
 use syntax::codemap;
+use syntax::crateid::CrateId;
 use std::io;
 use std::comm;
-use std::comm::{Chan, Port};
+use std::comm::{Receiver, Sender};
+use std::container;
+use std::io::{fs, FileStat, IoResult};
+use std::collections::{HashSet, HashMap};
+use sync::Future;
 
-/// Sessions:
-/// FIXME(diamond): 
+use address::{Address, CratePhase};
+use railroad::YardId;
+use super::super::{TargetId, SubtargetId};
 
-/// Interfaces:
-/// FIXME(diamond): add supervisors.
-/// FIXME(diamond): macro this.
+use super::diagnostics;
+use super::{DiagIf, DepIf, WorkCacheIf};
 
-/// These interfaces below serve to make our session object light enough
-/// to be pragmatically copy-able.
+// Interfaces:
+// FIXME(diamond): add supervisors.
+// FIXME(diamond): macro this.
 
-enum CMIMessage {
-    AddCMIRefMsg,
-    DropCMIRefMsg,
+// These interfaces below serve to make our session object light enough
+// to be pragmatically copy-able.
 
-    GetCodeMapCMIMessage(Chan<codemap::CodeMap>),
-}
-pub struct CodeMapperInterface {
-    chan: Chan<CMIMessage>,
-}
-impl CodeMapperInterface {
-    fn new() -> CodeMapperInterface {
-        let (port, chan) = comm::Chan::new();
-        spawn(proc() {
-                let port = port;
-                let mut codemap = codemap::CodeMap::new();
-                for message in port.iter() {
-                    match message {
-                        QuitCMIMessage(ret) => {
-                            ret.send(());
-                            break;
-                        }
-                        GetCodeMapCMIMessage(ret) => ret.try_send(codemap.clone()),
-                    }
-                }
-            });
-        CodeMapperInterface {
-            chan: chan,
-        }
-    }
-
-    pub fn full_codemap(&self) -> Future<codemap::CodeMap> {
-        let (port, chan) = comm::Chan::new();
-        self.chan.send(GetCodeMapCMIMessage(chan));
-        Future::from_port(port)
-    }
-}
-
-enum UserConfigMessage {
-    QuitUCMessage(comm::Port<()>),
-}
-pub struct UserConfigInterface {
-    chan: comm::Chan<UserConfigMessage>,
-}
-impl drop::Drop for UserConfigInterface {
-    fn drop(&mut self) {
-        let (port, chan) = Chan::new();
-        if self.chan.try_send(QuitCMIMessage(chan)) {
-            port.recv_opt();
-        }
-    }
-}
-enum BackendLoggerMessage {
-    AddBLIfRefMsg,
-    DropBLIfRefMsg,
-}
-/// a logger used in the backend task for non-fatal messages (mostly just for warnings).
-pub struct BackendLoggerIf {
-    chan: Chan<BackendLoggerMessage>
-}
 pub enum StaleDataset<TSet> {
-    /// if the db version in the file doesn't match FRESHNESS_DB_VERSION,
-    /// we need to unconditionally treat all input files as fresh even
-    /// though, because we can't read the db, we have no clue which specific
-    /// files are stale. This will also happen if the db was corrupted.
+    // if the db version in the file doesn't match FRESHNESS_DB_VERSION,
+    // we need to unconditionally treat all input files as fresh even
+    // though, because we can't read the db, we have no clue which specific
+    // files are stale. This will also happen if the db was corrupted.
     AllStaleDataset,
     SpecificStaleDataset(TSet),
 }
-impl<TMap: container::Map<Path, TMV>, TMV > StaleDataset {
-    pub fn is_stale(&self, path: &Path) -> bool {
+pub trait IsStale {
+    fn is_stale(&self, path: &Path) -> bool;
+}
+impl<TMap: container::Map<Path, TMV>, TMV> StaleDataset {
+    pub fn is_set_stale(&self, path: &Path) -> bool {
         match self {
             &AllStaleDataset => true,
             &SpecificStaleDataset(ref map) => map.contains_key(path),
@@ -107,7 +60,7 @@ impl<TMap: container::Map<Path, TMV>, TMV > StaleDataset {
     }
 }
 impl<TSet: container::Set<Path>> StaleDataset {
-    pub fn is_stale(&self, path: &Path) -> bool {
+    pub fn is_map_stale(&self, path: &Path) -> bool {
         match self {
             &AllStaleDataset => true,
             &SpecificStaleDataset(ref set) => set.contains(path),
@@ -119,16 +72,16 @@ enum FreshnessMessage {
     AddFreshIfRefMsg,
     DropFreshIfRefMsg,
 
-    QueryStalenessMsg(Chan<IoTimeStampResultDataMap>, HashSet<Path>),
-    /// for when we only need a yes or no answer.
-    QueryAnyFreshnessMsg(Chan<bool>, HashSet<Path>),
-    QueryIndividualFreshnessMsg(Chan<HashMap<Path, bool>>, HashSet<Path>),
+    QueryStalenessMsg(Sender<IoTimeStampResultDataMap>, HashSet<Path>),
+    // for when we only need a yes or no answer.
+    QueryAnyFreshnessMsg(Sender<bool>, HashSet<Path>),
+    QueryIndividualFreshnessMsg(Sender<HashMap<Path, bool>>, HashSet<Path>),
     TrackFreshnessMsg(HashMap<Path, TrackingMeta>),
 
-    /// you should almost always prefer to signal the individual files as fresh
-    /// instead of this 'nuke from orbit' option.
+    // you should almost always prefer to signal the individual files as fresh
+    // instead of this 'nuke from orbit' option.
     RefreshFreshnessMsg,
-    ///
+    //
     SignalFreshnessMsg(HashSet<Path>),
 }
 #[deriving(Clone, Eq, Encodable, Decodable)]
@@ -136,8 +89,8 @@ pub struct TrackingMeta {
     last_mod: u64,
     traverse_symlinks: bool,
 
-    /// can we stop tracking this path if during a session
-    /// it's stale and the router doesn't re-track it?
+    // can we stop tracking this path if during a session
+    // it's stale and the router doesn't re-track it?
     removable: bool,
 }
 #[deriving(Encodable, Decodable)]
@@ -149,7 +102,7 @@ impl FreshnessDb {
         
     }
     /// if the return is None, it means all files should be considered stale.
-    fn find_stale_files(&self, logger: &BackendLoggerIf) -> Option<IoTimeStampResultDataMet> {
+    fn find_stale_files(&self, logger: &DiagIf) -> Option<IoTimeStampResultDataMap> {
         if self.tracking.len() == 0 {
             None
         } else {
@@ -174,16 +127,16 @@ impl FreshnessDb {
         }
     }
 }
-/// FreshnessIf responds to queries regarding the freshness state of tracked files.
-/// Naturally, it also maintains the list of files we use to decide what needs to be built.
-/// It is target independent due to the target independent nature of source files.
+// FreshnessIf responds to queries regarding the freshness state of tracked files.
+// Naturally, it also maintains the list of files we use to decide what needs to be built.
+// It is target independent due to the target independent nature of source files.
 pub struct FreshnessIf {
-    chan: Chan<FreshnessMessage>,
+    chan: Sender<FreshnessMessage>,
 }
 static FRESHNESS_DB_VERSION: uint = 0;
 impl FreshnessIf {
-    fn run_db(port: &Port<FreshnessMessage>,
-              logger: &BackendLoggerIf,
+    fn run_db(port: &Receiver<FreshnessMessage>,
+              logger: &DiagIf,
               db_path: &Path) -> bool {
         let (mut stale_map,
              mut dragnetting,
@@ -212,7 +165,7 @@ impl FreshnessIf {
                         true => {
                             queried
                                 .move_iter()
-                                .map(|p| stale_map.find_or_insert_with(p.clone(), ret_modified) )
+                                .map(|p| stale_map.find_or_insert_with(p.clone(), modified) )
                                 .collect()
                         }
                         false => {
@@ -231,7 +184,7 @@ impl FreshnessIf {
                             // send ret value immediately, then do processing.
                             ret.try_send(true);
                             for p in queried.move_iter() {
-                                stale_map.find_or_insert_with(p, ret_modified);
+                                stale_map.find_or_insert_with(p, modified);
                             }
                         }
                         false => {
@@ -249,7 +202,7 @@ impl FreshnessIf {
                             // send ret value immediately, then do processing.
                             ret.try_send(queried.iter().map(|p| (p, true) ).collect());
                             for p in queried.move_iter() {
-                                stale_map.find_or_insert_with(p, ret_modified);
+                                stale_map.find_or_insert_with(p, modified);
                             }
                         }
                         false => {
@@ -265,7 +218,7 @@ impl FreshnessIf {
 
                 TrackFreshnessMsg(to_track) => {
                     let to_track = to_track.move_iter();
-                    new_tracking.extend(to_track.clone());
+                    new_tracks.extend(to_track.clone());
                     tracking_set.extend(to_track.map(|(p, _)| p));
                 }
             }
@@ -275,7 +228,7 @@ impl FreshnessIf {
         let tracking = tracking_map
             .move_iter()
             .filter_map(|(p, meta)| {
-                let newly_tracked = new_tracking.pop(p);
+                let newly_tracked = new_tracks.pop(p);
                 if meta.removable {
                     newly_tracked.map(|meta| (p, meta) )
                 } else {
@@ -292,23 +245,22 @@ impl FreshnessIf {
                             }))
                 }
             })
-            .chain(new_tracking.move_iter())
+            .chain(new_tracks.move_iter())
             .collect();
         let db = FreshnessDb {
             tracking: tracking,
         };
         db.save(db_path);
-        
 
         return ref_count != 0;
     }
-    fn task(port: Port<FreshnessMessage>,
-            logger: BackendLoggerIf,
+    fn task(port: Receiver<FreshnessMessage>,
+            diag: DiagIf,
             db_path: &Path) {
-        while FreshnessIf::run_db(port, logger, db_path) {}
+        while FreshnessIf::run_db(port, &diag, db_path) {}
     }
 
-    fn new(be_logger: BackendLoggerIf, db_path: Path) -> FreshnessIf {
+    fn new(diag: DiagIf, db_path: Path) -> FreshnessIf {
         
     }
 
@@ -318,20 +270,20 @@ impl FreshnessIf {
         self.are_any_fresh(set)
     }
     pub fn are_any_fresh(&self, paths: HashSet<Path>) -> Future<bool> {
-        let (port, chan) = Chan::new();
-        self.chan.send(QueryFreshnessMsg(chan, paths));
-        Future::from_port(port)
+        let (port, chan) = channel();
+        self.chan.send(QueryAnyFreshnessMsg(chan, paths));
+        Future::from_receiver(port)
     }
     pub fn individual_freshness(&self, paths: HashSet<Path>) -> Future<HashMap<Path, bool>> {
-        let (port, chan) = Chan::new();
+        let (port, chan) = channel();
         self.chan.send(QueryIndividualFreshnessMsg(chan, paths));
-        Future::from_port(port)
+        Future::from_receiver(port)
     }
 
     pub fn staleness(&self, paths: HashSet<Path>) -> Future<IoTimeStampResultDataMap> {
-        let (port, chan) = Chan::new();
+        let (port, chan) = channel();
         self.chan.send(QueryStalenessMsg(chan, paths));
-        Future::from_port(port)
+        Future::from_receiver(port)
     }
     pub fn track_one(&self, path: Path, meta: TrackingMeta) {
         let mut paths = HashMap::new();
@@ -346,25 +298,14 @@ impl FreshnessIf {
 // Defines the interface to session data managed on a per target basis.
 pub struct TargetIf;
 
-pub trait Driver {
-    fn fatal(&self, origin: Origin, msg: &str) -> !;
-    fn err(&self, origin: Origin, msg: &str);
-    fn warn(&self, origin: Origin, msg: &str);
-    fn info(&self, origin: Origin, msg: &str);
-    fn abort_if_errors(&self);
-}
-
 #[deriving(Clone)]
-pub struct Session_ {
-    codemapper: CodeMapperIf,
+pub struct Session {
+    diag:       diagnostics::SessionIf,
     freshness:  FreshnessIf,
     dep:        DepIf,
     workcache:  WorkCacheIf,
 }
 impl Session {
-    pub fn codemapper<'a>(&'a self) -> &'a CodeMapperIf {
-        self.codemapper
-    }
     pub fn freshness<'a>(&'a self) -> &'a FreshnessIf {
         self.freshness
     }
@@ -407,25 +348,15 @@ impl Session {
         }
     }
 }
-impl Driver for Session_ {
-    fn fatal(&self, origin: Origin, msg: &str) -> ! {
-        
-    }
-    fn err(&self, origin: Origin, msg: &str) {
-    }
-    fn warn(&self, origin: Origin, msg: &str) {
-    }
-    fn info(&self, origin: Origin, msg: &str) {
-    }
-}
+
 #[deriving(Clone)]
 pub struct Router {
-    addr: address::Address,
+    addr: Address,
 
     diag:   diagnostics::SessionIf,
-    dep:    dep::SessionIf,
-    wc:     workcache::SessionIf,
-    build:  build_crate::SessionIf,
+    dep:    DepIf,
+    wc:     WorkCacheIf,
+    //build:  build_crate::SessionIf,
 }
 impl Router {
     pub fn incr_yard(&mut self, yard: YardId) {
@@ -451,63 +382,4 @@ impl Session for Router {
     fn subtarget_id(&self) -> SubtargetId {
         self.addr.subtarget_id().expect("this address should always have a subtarget prefix")
     }
-}
-
-pub struct Configure {
-    src_path: Path,
-    build_path: Path,
-    rustb_path: Path,
-    
-    default_target: Option<Target>,
-}
-pub struct Target {
-    name: String,
-    mach: mach_target::Target,
-    
-}
-impl Target {
-    pub fn new() -> Target {
-        
-    }
-}
-impl Default for Target {
-    fn default() -> Target {
-        Target {
-            name: "default".to_string(),
-            mach_target: mach_target::get_host_triple()
-        }
-    }
-}
-
-pub fn find_crates_in_dir<TSess: Session>(_sess: &TSess, cwd: &Path) -> io::IoResult<~[Crate]> {
-    let mut contents = try!(io::fs::readdir(cwd));
-    contents.retain(|p| -> bool {
-            p != BUILD_CRATE_FILENAME && p.extension_str().map_or(false, |ext| ext == "rs")
-        });
-    result::Ok(contents.move_iter().filter_map(|p| {
-            // FIXME(diamond): this could reasonably be done in parallel.
-            task::try(proc() {
-                    let cm = codemap::CodeMap::new();
-                    let sh = mk_silent_span_handler(cm);
-                    let parse_sess = ParseSess::new_special_handler_path(sh,
-                                                                         cm,
-                                                                         path);
-                    let crate_config = Vec::new();
-                    let attrs = parse_crate_attrs_from_file(p,
-                                                            crate_config,
-                                                            parse_sess);
-                    attr::find_crateid(attrs)
-                        .map(|id| {
-                            Crate {
-                                id: Some(id),
-                                file: p.clone()
-                            }
-                        }).unwrap_or_else(|| {
-                            Crate {
-                                id: None,
-                                file: p.clone()
-                            }
-                        })
-                }).ok()
-        }).collect())
 }

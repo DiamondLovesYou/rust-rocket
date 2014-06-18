@@ -15,75 +15,19 @@
 // You should have received a copy of the GNU Lesser General Public License
 // along with Rust Rocket. If not, see <http://www.gnu.org/licenses/>.
 
-/// Stuff related to toolchain impersonation.
+use toolchain::tool::{Tool, Compiler, Cc, Cxx, Ar, Ld};
 
-use std::path::Path;
-
-#[deriving(Encodable, Decodable)]
-pub enum Compiler {
-    Clang(~str),
-    Gcc(~str),
-}
-impl Compiler {
-    pub fn get_cmd(&self) -> ~str {
-        match self {
-            &Clang(ref cmd) | &Gcc(ref cmd) => cmd.clone(),
-        }
-    }
-}
-
-#[deriving(Encodable, Decodable)]
 pub struct State {
-    c: Compiler,
-    cxx: Compiler,
-    ar: ~str,
-    ld: ~str,
     
-    // global here means on all files
-    c_global_overrides: Option<~[Override<~str>]>,
-    cxx_global_overrides: Option<~[Override<~str>]>,
-
-    file_overrides: Option<HashMap<~str, Overrides<~str>>>,
-}
-impl State {
-    pub fn build_new() -> Path {
-    }
-}
-pub struct StateFile(Path);
-impl StateFile {
-    
-}
-impl Drop for StateFile {
-    fn drop(&mut self) {
-        fs::unlink(*self)
-    }
-}
-
-pub enum Tool {
-    CC,
-    CXX,
-    AR,
-    LD,
-}
-impl FromStr for Tool {
-    fn from_str(s: &str) -> Option<Tool> {
-        match s {
-            "cc" =>  Some(CC),
-            "c++" => Some(CXX),
-            "ar" =>  Some(AR),
-            "ld" =>  Some(LD),
-            _ =>     None,
-        }
-    }
 }
 
 pub struct Invocation<'a> {
-    state_file: Path,
+    state: Path,
     print_invocation: bool,
     // are we under a configure script? if so we don't need to resolve addresses.
     configure: bool,
     tool: Tool,
-    opts: &'a [~str],
+    opts: &'a [String],
 }
 
 impl<'a> Invocation<'a> {
@@ -100,22 +44,24 @@ impl<'a> Invocation<'a> {
     }
 
     pub fn run(&self) {
-        // don't try block this; if we can't read the state file, we really do need to fail!().
+        use std::io::fs::File;
+        use serialize::ebml::reader::Decoder;
+        use serialize::ebml::Doc;
+        // don't try-block this; if we can't read the state file, we really do need to fail!().
         let state = {
-            use serialize::ebml::reader::{Decoder, Doc};
             let state_bytes = try!({try!(File::open(self.state_file))}.read_to_end());
-            let mut decoder = Decoder(Doc(state_bytes));
+            let mut decoder = Decoder::new(Doc::new(state_bytes));
             decode(&mut decoder)
         };
         
         match self.tool {
-            CC => {
+            Cc => {
             }
-            CXX => {
+            Cxx => {
             }
-            AR => {
+            Ar => {
             }
-            LD => {
+            Ld => {
 
             }
         }

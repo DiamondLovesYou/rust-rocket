@@ -16,12 +16,12 @@
 // along with Rust Rocket. If not, see <http://www.gnu.org/licenses/>.
 
 #![crate_id = "rocket#0.1"]
-#![comment = "The Rust project builder"]
+#![comment = "A Rust project builder"]
 #![license = "GNU/LGPLv3"]
 #![crate_type = "dylib"]
 #![crate_type = "rlib"]
 
-#![feature(phase, managed_boxes, struct_variant)]
+#![feature(phase, managed_boxes, struct_variant, macro_rules)]
 
 extern crate syntax;
 extern crate rustc;
@@ -35,21 +35,31 @@ extern crate log;
 extern crate green;
 extern crate sqlite = "sqlite3#0.1";
 extern crate bindgen;
+extern crate collections;
+extern crate rustuv;
+extern crate sync;
+extern crate time;
+extern crate url;
 
-use build_crate::BuildCrate;
+use buildcrate::BuildCrate;
 
 use syntax::ast::{CrateConfig, Name};
 use syntax::diagnostic::{Emitter, Handler};
 use std::path::Path;
-use std::send_str::SendStr;
+use std::str::MaybeOwned;
 use std::rc::{Rc, Weak};
-use rustc::driver::session::CrateType;
+use rustc::driver::config::CrateType;
 
-pub mod build_crate;
-pub mod toolchain_wrap;
+pub mod buildcrate;
+pub mod toolchain;
 pub mod user;
 pub mod driver;
 pub mod platform_dep;
+pub mod address;
+pub mod override;
+pub mod workcache;
+pub mod railroad;
+pub mod dep;
 
 pub static BUILD_CRATE_FILENAME: &'static str = "build.rs";
 pub static RUSTB_PATH: &'static str = ".rustb";
@@ -57,6 +67,75 @@ pub static MSTR_DB_FILENAME: &'static str = "master.db";
 pub static DB_EXT: &'static str = "db";
 pub static IN_TREE_BUILD_SUBPATH: &'static str = "build";
 pub static TARGETS_PATH: &'static str = "target";
+
+macro_rules! build_session {
+    (
+        enum Message {
+            $($msg:ident ($($bind:pat),*): ($($ty:ty),*) => $block:block),*
+        }
+        struct Database {
+            $version:expr,
+
+            $($db_col:ident : $db_col_ty:ty),*
+        }
+        struct Session {
+            $($sess_col:ident : $sess_col_ty:ty),*
+        }
+    ) => {
+        enum Message {
+            AddRefMsg,
+            // if Some(..), send back the post de-reference ref count.
+            // used during shutdown to assert there are no more refs.
+            DropRefMsg(Option<Sender<u64>>),
+
+            $($msg ($($ty),*)),*
+        }
+        // Stores all persistent data.
+        struct Database {
+            $($db_col : $db_col_ty),*
+        }
+        // Stores Stuff we don't want (or can't) save to disk.
+        struct Session {
+            db:   Database,
+
+            ref_count: uint,
+
+            diag: driver::DiagIf,
+
+            
+        }
+
+        impl Session {
+            fn new_task((port, chan): (Receiver<Message>,
+                                       Sender<Message>),
+                        diag: driver::DiagIf,
+                        rustb: Path) -> Sender<Message> {
+                tasks::spawn(proc() {
+                    
+                })
+            }
+        }
+
+        pub struct SessionIf {
+            chan: Sender<Message>,
+        }
+        impl clone::Clone for SessionIf {
+            fn clone(&self) -> SessionIf {
+                self.chan.send(AddRefMsg);
+                SessionIf {
+                    chan: self.chan.clone();
+                }
+            }
+        }
+        impl drop::Drop for SessionIf {
+            fn drop(&mut self) {
+                self.chan.send(DropRefMsg(None));
+            }
+        }
+
+    }
+}
+
 
 struct SilentEmitter;
 
@@ -122,7 +201,7 @@ impl Build {
         
     }
     pub fn new_out_of_tree(config: Configure) -> Build {
-        build.create_new_target("default".to_strbuf());
+        build.create_new_target("default".to_string());
 
         build
     }
@@ -182,7 +261,7 @@ impl Build {
     }
     pub fn build(&mut self,
                  sess: &session::SessionIf,
-                 target: Option<~str>) {
+                 target: Vec<String>) {
         for t in self.targets
             .mut_iter()
             .filter(|t| target.is_none() || t.name == target.unwrap() ) {
@@ -215,6 +294,8 @@ impl Configure for Option<Build> {
         }
     }
 }
+pub type TargetId = uint;
+pub type SubtargetId = uint;
 
 // Note Target is also a subtarget; specifically, it's the target's target
 pub struct Target {
@@ -225,10 +306,7 @@ pub struct Target {
     build_subtarget: Option<Subtarget>,
     host_subtarget: Option<Subtarget>,
 
-    mach: mach_target::Target,
-
-    // cache
-    path: Path,
+    triple: MachineTriple,
 }
 impl Target {
     pub fn build<TSess: session::Session>(&mut self,
@@ -246,11 +324,17 @@ pub struct Subtarget {
     id: u64,
     name: Name,
 
-    triple: mach_target::Target,
+    triple: MachineTriple,
 
     crates: Vec<Address>,
 }
 impl Subtarget {
+}
+
+pub trait SubtargetEsk {
+    fn address_prefix(&self) -> address::Prefix;
+
+    fn triple<'a>(&'a self) -> &'a MachineTriple;
 }
 
 pub struct Extern {
@@ -259,25 +343,9 @@ pub struct Extern {
     build_crate: build_crate::Crate,
 }
 
-pub enum DebuggingKey {
-    // TODO
-}
-
-pub type CodeGenOverrideValue   = OverrideValue<BooleanValue>;
-pub type DebuggingOverrideValue = OverrideValue<BooleanValue>;
-#[deriving(Encodable, Decodable)]
-pub enum OverrideType {
-    ArgumentOverride(ArgumentOverrideValue),
-    CrateOverride(CrateOverrideValue),
-}
-
-pub trait Addressable {
-    fn name(&self) -> Name;
-    fn address(&self) -> Address;
-}
 pub struct Crate {
     id: Option<CrateId>,
-    file: Path,    
+    file: Path,
 }
 
 pub trait ItemUse {
@@ -295,55 +363,13 @@ pub trait ItemUse {
     fn with_outputs<U>(&self, f: |&[Item]| -> U) -> U;
 }
 
-pub enum Branches {
-    IfThen(&'static Item),
-    IfThenElse(&'static Item,  // then
-               &'static Item), // else
+pub struct MachineTriple(String);
+impl fmt::Show for MachineTriple {
+    fn fmt(&self, fmt: &mut Formatter) -> fmt::Result {
+        let &MachineTriple(ref inner) = self;
+        inner.fmt(fmt)
+    }
 }
-pub enum Source_ {
-    FromSystem(&'static Item),
-    FromDependancy(&'static Item),
-}
-
-pub enum Item_ {
-    ToolItem(&'static Source),
-    StaticItem(&'static str),
-    BranchedItem {
-        br: &'static Branches,
-        cond: &'static Item
-    },
-}
-
-pub struct GraphedNode<T> {
-    id: u64,
-    name: SendStr,
-    span: syntax::Span,
-
-    node: T,
-
-    children: uint,
-    parents:  uint,
-}
-
-pub enum Locus_ {
-    // Finds all crates in the immediate sub-directory.
-    DirectoryLocus(SendStr),
-    // Specify 
-    ExplicitLocus(SendStr),
-}
-pub type Locus = GraphedNode<Locus_>;
-
-
-pub type CfgValue = GraphedNode<CfgValue_>;
-
-pub struct Crate_ {
-    locus: CrateLocus,
-
-    cfg: HashMap<SendStr, CfgValue>,
-}
-pub type Crate = GraphedNode<Crate_>;
-
-pub struct MachineTarget(String);
 
 pub enum PreferenceLevel {
     UserPrefLevel,

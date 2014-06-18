@@ -16,8 +16,7 @@
 // along with Rust Rocket. If not, see <http://www.gnu.org/licenses/>.
 
 use std::intrinsics::type_id;
-use collections::hashmap::HashMap;
-use native::io::fd_t;
+use std::collections::hashmap::HashMap;
 use time;
 
 // Determines the maximum size of in-memory objects;

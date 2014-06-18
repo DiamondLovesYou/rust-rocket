@@ -15,28 +15,29 @@
 // You should have received a copy of the GNU Lesser General Public License
 // along with Rust Rocket. If not, see <http://www.gnu.org/licenses/>.
 
-use syntax::codemap::CodeMap;
-
-pub mod session;
-pub mod error_codes;
-pub mod diagnostics;
-
-pub type BuildId = uint;
-
-pub type DiagIf = diagnostics::SessionIf;
-pub type DepIf  = super::dep::SessionIf;
-pub type WorkCacheIf = super::workcache::SessionIf;
-
-local_data_key!(diagnostics_: DiagIf)
-
-pub fn initialize_diag(diag: DiagIf) {
-    diagnostics_.replace(Some(diag));
+#[deriving(Encodable, Decodable, Clone, Eq, PartialEq)]
+pub enum Compiler {
+    Clang,
+    Gcc,
 }
-pub fn deinitialize_diag() -> Option<DiagIf> {
-    diagnostics_.replace(None); 
+
+#[deriving(Encodable, Decodable, Clone, Eq, PartialEq)]
+pub enum Tool {
+    Cc(Compiler),
+    Cxx(Compiler),
+    Ar,
+    Ld,
 }
-pub fn diagnostics() -> DiagIf {
-    diagnostics_.get()
-        .expect("task diagnostics uninitialized!")
-        .clone()
+impl FromStr for Tool {
+    fn from_str(s: &str) -> Option<Tool> {
+        match s {
+            "cc" =>  Some(Cc),
+            "gcc" => Some(Cc),
+            "clang" => Some(Cc),
+            "c++" => Some(Cxx),
+            "ar" =>  Some(Ar),
+            "ld" =>  Some(Ld),
+            _ =>     None,
+        }
+    }
 }

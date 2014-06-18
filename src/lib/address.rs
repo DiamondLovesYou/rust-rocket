@@ -15,11 +15,20 @@
 // You should have received a copy of the GNU Lesser General Public License
 // along with Rust Rocket. If not, see <http://www.gnu.org/licenses/>.
 
-use std::to_bytes;
-use std::path;
-use rustc::driver::session::CrateType;
+use std::{path, clone};
+use std::default::Default;
+use std::collections::{EnumSet, TreeMap, HashMap};
+use std::collections::enum_set::CLike;
+use std::io::IoResult;
+use sync::Future;
+use syntax::crateid::CrateId;
+use rustc::driver::config::CrateType;
 
-#[deriving(Encodable, Decodable, Clone, Hash, Eq, Ord, TotalOrd)]
+use railroad::{YardId, CargoKey};
+use super::{TargetId, SubtargetId};
+use override::{Origin, Overrides};
+
+#[deriving(Encodable, Decodable, Clone, Hash, Eq, Ord, PartialEq)]
 pub struct Address {
     prefix: Prefix,
     segments: Vec<Segment>,
@@ -29,11 +38,7 @@ impl Address {
     pub fn from_crate_id(id: CrateId) -> Address {
         Address {
             prefix: EmptyPrefix,
-            segments: vec!(CrateSegment(id, None, {
-                        let mut set = EnumSet::empty();
-                        set.add(phase);
-                        set
-                    })),
+            segments: vec!(CrateSegment(id, None, EnumSet::empty())),
             suffix: EmptySuffix,
         }
     }
@@ -73,12 +78,12 @@ impl Address {
         }
     }
 }
-impl default::Default for Address {
+impl Default for Address {
     fn default() -> Address {
         Address {
-            prefix: default(),
+            prefix: Default::default(),
             segments: Vec::new(),
-            suffix: default(),
+            suffix: Default::default(),
         }
     }
 }
@@ -91,12 +96,10 @@ pub enum Suffix {
     TrainCargoKeySuffix(CargoKey),
     TrainYardSuffix(YardId),
     TrainYardCargoKeySuffix(YardId, CargoKey),
-
-    OverrideSuffix(override::Key),
 }
-impl default::Default for Suffix {
+impl Default for Suffix {
     fn default() -> Suffix {
-        EmptySuffex
+        EmptySuffix
     }
 }
 pub trait Suffixable: clone::Clone {
@@ -108,39 +111,39 @@ impl Suffixable for Address {
                                   yard: YardId,
                                   cargo: CargoKey) -> Address {
         Address {
-            suffex: TrainYardCargoTypeSuffex(yard, cargo),
+            suffex: TrainYardCargoKeySuffix(yard, cargo),
             .. self.clone()
         }
     }
     pub fn with_yard_suffex(&self,
-                            yardid: YardId) -> Address {
+                            yard: YardId) -> Address {
         Address {
-            suffex: TrainYardSuffex(yard),
+            suffex: TrainYardSuffix(yard),
             .. self.clone()
         }
     }
 }
 #[deriving(Clone, Hash, Eq, Encodable, Decodable)]
 pub enum CratePhase {
-    CrateSyntaxPhase,
+    CratePluginPhase,
     CrateLinkPhase,
 }
 impl CLike for CratePhase {
     fn to_uint(&self) -> uint {
         match self {
-            CrateSyntaxPhase => 0,
+            CratePluginPhase => 0,
             CrateLinkPhase =>   1,
         }
     }
     fn from_uint(i: uint) -> CratePhase {
         match i {
-            0 => CrateSyntaxPhase,
+            0 => CratePluginPhase,
             1 => CrateLinkPhase,
             _ => unreachable!(),
         }
     }
 }
-pub type CratePhases = enum_set::EnumSet<CratePhase>;
+pub type CratePhases = EnumSet<CratePhase>;
 /// These are mutually exclusive and only make sense at the start of an address
 /// Hence, I moved them to their own enum.
 #[deriving(Encodable, Decodable, Clone, Hash, Eq)]
@@ -201,20 +204,22 @@ impl Prefixable for Address {
     }
 }
 
-#[deriving(Encodable, Decodable, Clone, Hash, Ord, TotalOrd)]
+#[deriving(Encodable, Decodable, Clone, Hash, Ord)]
 pub enum Segment {
     CrateSegment(CrateId, Option<CrateType>, CratePhases),
     
     // A file in a project utilizing an external build system (EBS).
     // The path is relative to the root of the project referenced in the project
-    PathSegment(PathId),
+    PathSegment(Path),
+
+    RegexSegment(String),
 }
 
-enum Messsage {
+enum Message {
     AddIfRefMsg,
     // if Some(..), send back the post de-reference ref count.
     // used during shutdown to assert there are no more refs.
-    DropIfRefMsg(Option<Chan<u64>>),
+    DropIfRefMsg(Option<Sender<u64>>),
 
     GetOverrides(Sender<(Address, Option<Overrides>)>, Address),
 
@@ -231,7 +236,7 @@ struct AddressGraph {
 struct Addresser {
     src: HashMap<CrateId, Segment>,
     // -l libraries.
-    ebs_libs: HashMap<StrBuf, Path>,
+    ebs_libs: HashMap<String, Path>,
     graph: AddressGraph,
 }
 impl Addresser {
