@@ -23,6 +23,7 @@ use std::io::Writer;
 use std::collections::hashmap::{HashMap, HashSet};
 use std::str::MaybeOwned;
 use syntax::codemap;
+use syntax::crateid::CrateId;
 use std::u64;
 use url;
 
@@ -49,7 +50,10 @@ pub enum Origin {
 pub enum MultiSetOp<T> {
     AddMSK,
     RemoveMSK,
-    ReplaceMSK(TagOrValueKey<T>),
+    ReplaceMSK {
+        what: TagOrValueKey<T>,
+        once_: bool,
+    },
 }
 
 #[deriving(Encodable, Decodable, Eq, Clone, Hash, Ord, PartialEq)]
@@ -76,6 +80,7 @@ pub enum CrateSource {
     DirCrateSource(Path),
 
     RepoCrateSource(url::Url),
+    AddressCrateSource(Address),
 }
 #[deriving(Encodable, Decodable, Clone, Hash)]
 pub struct ValueOrigin<T> {
@@ -199,19 +204,13 @@ impl Overridable for ArgumentValues {
 }
 #[deriving(Encodable, Decodable, Hash, Clone, Eq)]
 pub enum Override {
-    ArgOverride(ToolId),
+    ArgOverride(ToolId, MultiSet<String>),
     ToolOverride(ToolId, Path),
     CrateOverride(CrateId),
     RustCfgOverride,
     CodegenOverride(String),
 }
 
-#[deriving(Encodable, Decodable, Hash, Clone)]
-pub enum Value {
-    ArgValue(ArgumentValues),
-    ToolValue(Tool),
-    RustCfgValue(Vec<CfgMap>),
-}
 #[deriving(Encodable, Decodable, Hash, Clone)]
 pub struct Overrides {
     overrides_for: Address,
@@ -221,35 +220,45 @@ pub struct Overrides {
     tools: HashMap<ToolId, Path>,
     crates: HashMap<CrateId, Path>,
 
-    crates: HashMap<CrateId, CrateOverrideValue>,
-    cfg: Vec<ValueOrigin<MultiSetValue<CfgValue>>>,
+    cfg: Vec<ValueOrigin<MultiSet<CfgValue>>>,
     
-    codegen: CodegenOverrides,
+    //codegen: CodegenOverrides,
 }
 impl Overrides {
     pub fn new() -> Overrides {
         Overrides {
             args: HashMap::new(),
             crates: HashMap::new(),
-            codegen: CodegenOverrides::new(),
+            //codegen: CodegenOverrides::new(),
         }
     }
 
-    pub fn flatten(&mut self) {
-        // this is specifically not unimplemented b/c this operation is only an
-        // optimization. 
-        error!("not implemented");
-    }
+    pub fn override_argument(&mut self,
+                             tool: ToolId,
+                             override: ArgumentValue) {
+        // TODO after build crate stuffs.
+        /*fn mutate(_, &ArgumentValues(ref mut overrides), override) {
+            match override.op {
+                ReplaceMSK
+            }
+            let os = replace(overrides, Vec::new());
+            let mut replaced = false;
+            os.move_iter()
+                .filter_map(|o| {
+                    let mut move = false;
+                    match o.op {
+                        Repla
+                    }
+                });
+        }
 
-    pub fn override_argument(&mut self, tool: ToolId, override: ArgumentValue) {
-        self.args.mangle(mask,
+        use std::mem::replace;
+        self.args.mangle(tool,
                          override,
                          |_, override| vec!(override),
-                         |_, &mut overrides, override| {
-                overrides.push(override)
-            });
+                         mutate);*/
     }
-    pub fn override_crate(&mut self, krate: CrateOverrideValue) {
+    pub fn override_crate(&mut self, krate: CrateSource) {
         
     }
 }
@@ -272,7 +281,7 @@ impl Overridable for Overrides {
 }
 
 pub trait Overridable {
-    fn override_with(&self, with: &Value<Self>) -> Self;
+    fn override_with(&self, with: &ValueOrigin<Self>) -> Self;
 }
 
 // Declare a macro that will define all CodegenOptions fields and parsers all
