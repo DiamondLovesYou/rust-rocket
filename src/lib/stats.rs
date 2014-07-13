@@ -18,12 +18,19 @@
 //! Stat collection, accounting, and consideration.
 //! FIXME(diamond): collect memory consumption and hdd activity stats.
 
+use std::comm::Sender;
+use std::collections::HashMap;
+
+use address::Address;
+
+enum Message {
+    
+}
+
 #[deriving(Clone, Encodable, Decodable)]
 pub struct Router {
-
-
     /// Every train yard has its own entry here:
-    time: ~[u64],
+    time: Vec<u64>,
 }
 
 #[deriving(Encodable, Decodable)]
@@ -32,5 +39,5 @@ struct Session {
 }
 #[deriving(Clone)]
 pub struct SessionIf {
-    priv chan: Chan<Message>,
+    chan: Sender<Message>,
 }

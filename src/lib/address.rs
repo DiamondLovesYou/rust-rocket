@@ -20,7 +20,7 @@ use std::default::Default;
 use std::collections::{EnumSet, TreeMap, HashMap};
 use std::collections::enum_set::CLike;
 use std::io::IoResult;
-use sync::Future;
+use std::sync::Future;
 use syntax::crateid::CrateId;
 use rustc::driver::config::CrateType;
 
@@ -107,15 +107,15 @@ pub trait Suffixable: clone::Clone {
     fn with_yard_suffix(&self, yard: YardId) -> Address;
 }
 impl Suffixable for Address {
-    pub fn with_yard_cargo_suffex(&self,
-                                  yard: YardId,
-                                  cargo: CargoKey) -> Address {
+    fn with_yard_cargo_suffix(&self,
+                              yard: YardId,
+                              cargo: CargoKey) -> Address {
         Address {
             suffex: TrainYardCargoKeySuffix(yard, cargo),
             .. self.clone()
         }
     }
-    pub fn with_yard_suffex(&self,
+    pub fn with_yard_suffix(&self,
                             yard: YardId) -> Address {
         Address {
             suffex: TrainYardSuffix(yard),

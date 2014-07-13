@@ -100,7 +100,7 @@ impl SessionIf {
         }
     }
     pub fn emitter(&self) -> EmitterWriter {
-        EmitterWriter::new(box self.clone() as Box<Writer:Send>)
+        EmitterWriter::new(box self.clone() as Box<Writer + Send>)
     }
     pub fn errors(&self) -> uint {
         let (port, chan) = channel();

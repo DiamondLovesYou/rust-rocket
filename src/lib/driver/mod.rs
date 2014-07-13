@@ -24,7 +24,7 @@ pub mod diagnostics;
 pub type BuildId = uint;
 
 pub type DiagIf = diagnostics::SessionIf;
-pub type DepIf  = super::dep::SessionIf;
+//pub type DepIf  = super::dep::SessionIf;
 pub type WorkCacheIf = super::workcache::SessionIf;
 
 local_data_key!(diagnostics_: DiagIf)

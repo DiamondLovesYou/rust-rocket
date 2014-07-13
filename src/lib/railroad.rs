@@ -15,9 +15,21 @@
 // You should have received a copy of the GNU Lesser General Public License
 // along with Rust Rocket. If not, see <http://www.gnu.org/licenses/>.
 
-use std::intrinsics::type_id;
-use std::collections::hashmap::HashMap;
+use std::any::Any;
+use std::cell::{RefCell};
+use std::collections::{HashMap, HashSet};
+use std::intrinsics::{type_id, TypeId};
+use std::sync::Future;
+use std::default;
+
 use time;
+use rustc;
+
+use address;
+use driver::session;
+use override;
+use override::Origin;
+use stats;
 
 // Determines the maximum size of in-memory objects;
 // types larger than 2 MB are deemed freight.
@@ -25,85 +37,42 @@ static OCCUPANCY_CAPACITY: u64 = 1024 * 1024 * 2;
 
 #[deriving(Encodable, Decodable)]
 pub struct Router {
-    router_for: address::Address,
     yards: Vec<Yard>,
-    names: HashMap<StrId, uint>,
 }
 impl Router {
-    pub fn embark(&mut self,
-                  input: InputCargo,
-                  mut conductor: session::Router) -> stats::Router {
-        let mut stats = stats::Router::new();
-        if self.yards.len() == 0 { return stats; }
+    pub fn new() -> Router {
+        Router {
+            yards: Vec::new(),
+        }
+    }
 
+    pub fn push_yard(&mut self,
+                     mut yard: Yard) -> YardId {
+        let id = self.yards.len();
+        yard.id = id;
+        self.yards.push(yard);
+        id
+    }
+
+    pub fn embark(&self,
+                  input: InputCargo,
+                  mut conductor: session::Router) {
+        let addr = conductor.address().clone();
         let mut yard_iter = self.yards.iter().peekable();
         let mut train = Train::new(conductor.input);
 
         let mut next_hump = yard_iter.peek().get_ref().hump_cache.clone();
         let mut this_hump;
 
-        loop {
-            let this = match yard_iter.next() {
-                Some(n) => n,
-                None => { break; }
-            };
+        for yard in yard_iter {
+            let yard_addr = conductor.with_yard_suffex(yard.id);
 
-            let yard_addr = addr.with_yard_suffex(this.id);
-
-            // write to disk cargo written in this yard, but isn't read by the next yard.
-            let prep = match yard_iter.peek() {
-                Some(ref next) => {
-                    let this_reads = this.hump_cache.reads_ref();
-                    let this_writes = this.hump_cache.writes_ref();
-                    let this_in_mem = this_reads.union(this_writes).collect();
-
-                    let next_reads = next.hump_cache.reads_ref();
-
-                    let write_to_disk = this_writes
-                        .difference(next_reads)
-                        .filter_map();
-                    let read_from_disk = next_reads.difference(this_in_mem);
-
-                    let this_combined = this_prep.reads.union(this_prep.writes);
-                    let to_load = next_prep.reads.difference(this_combined);
-                    // if we write a cargo in this yard but it isn't used in the next yard,
-                    // we still need to keep it in memory
-                    let writes_to_unload;
-                    let to_unload = this_combined.difference(next_prep.reads);
-
-                    // FIXME check for preexistence with UnloadClass
-
-                    Future::from_val((to_load, to_unload))
-                }
-                None => {}
-            };
-            let start = time::precise_time_ns();
-
-            
-
+            //let start = time::precise_time_ns();
             yard.route(self, conductor, train);
-            let end = time::precise_time_ns();
+            //let end = time::precise_time_ns();
             
-            // first, to free up memory, unload those cargos which aren't used in the next yard.
-            let (load, unloaded_writes, unload) = prep.get();
-
-            // first, send the built (written) cargo off the the cache:
-            // a part of this step involves calculating whether or not a cargo has changed.
-
-            // now, if a piece of cargo is determined to be dissimilar to its previous value,
+            // if a piece of cargo is determined to be dissimilar to its previous value,
             // bump the revisions of said cargo:
-
-            
-        }
-    }
-
-    fn prep_for_next_yard(first_iteration: bool,
-                          yard: &Yard,
-                          prep: YardPrep) -> Future<YardPrep> {
-        
-        if first_iteration {
-        } else {
-            
         }
     }
 }
@@ -171,15 +140,15 @@ pub struct HumpCache {
     reads:        HashSet<CargoKey>,
 }
 impl HumpCache {
-    fn new() -> Hump {
-        let mut hump = Hump {
+    fn new() -> HumpCache {
+        let mut hump = HumpCache {
             by_cargo_key: HashMap::new(),
             writes:       HashSet::new(),
             reads:        HashSet::new(),
         };
     }
     fn merge_read(&mut self, id: CargoKey) -> bool {
-        let mut new = false;
+        let mut is_new = false;
         self.by_cargo_key.insert_or_update_with(id, ScannedClass, |_, c| {
                 // don't dirty the new status if this yard also loaded the cargo
                 if c.is_read() || *c == LoadClass {
@@ -189,9 +158,9 @@ impl HumpCache {
                     &NonStopClass => *c = ScannedClass,
                     _ => { return; }
                 };
-                new = true;
+                is_new = true;
             });
-        if new {
+        if is_new {
             self.reads.insert(id);
             true
         } else { false }
@@ -206,9 +175,9 @@ impl HumpCache {
                     &NonStopClass | &ScannedClass => *c = RefineryClass,
                     _ => { return }
                 };
-                new = true;
+                is_new = true;
             });
-        if new {
+        if is_new {
             self.writes.insert(id);
             true
         } else { false }
@@ -238,13 +207,15 @@ impl HumpCache {
         self.writes.clone()
     }
 }
-pub type HumpPush = |CargoKey, Classification, Origin|;
+pub type HumpPush = |CargoKey, Classification|;
 pub type Hump = fn(push: HumpPush);
-pub type YardId = StrId;
+pub type YardId = uint;
+
 #[deriving(Encodable, Decodable)]
 pub struct Yard {
-    origin: Origin,
     id: YardId,
+    origin: Origin,
+    name: String,
     hump: Hump,
     hump_cache: HumpCache,
     industry: Industry,
@@ -263,15 +234,15 @@ impl Yard {
             hump_cache: None,
         }
     }
-    fn route(&self, sess: &session::Session_, router: &Router, train: &mut Train) {
+    fn route(&self, sess: &session::Session, router: &Router, train: &mut Train) {
         
     }
 }
 
 #[deriving(Eq, Clone, Encodable, Decodable, Hash)]
-enum CargoKey {
+pub enum CargoKey {
     TypeIdCargoKey(TypeId),
-    OverrideCargoKey(override::Key),
+    OverrideCargoKey(override::Override),
 
     // build steps/what-have-you
     DepCargoKey(address::Address),
@@ -302,7 +273,7 @@ pub struct Train {
     rustc_sess: rustc::driver::session::Session,
 }
 impl Train {
-    fn new(input: Input) -> Train {
+    fn new(input: InputCargo) -> Train {
         let mut train = Train {
             cars: HashMap::new(),
         };
@@ -320,20 +291,20 @@ impl Train {
         self.hump.merge_read(MainInputCargoKey);
         self.main_input
     }
-    pub fn decouple<T: Car>(&mut self, origin: Origin) -> T {
+    pub fn decouple<T: Any>(&mut self) -> T {
         let key = TypeIdCargoKey(type_id::<T>());
         self.cars.pop(key).expect("yard hump didn't declare read \
-                                             access to this car")
+                                   access to this car") as T
     }
-    pub fn couple<T: Car>(&mut self, origin: Origin, car: T) {
+    pub fn couple<T: Any>(&mut self, car: T) {
         let key = TypeIdCargoKey(type_id::<T>());
         self.cars.insert_or_update_with(key, box car as Box<Any>, |_, old| {
                 
             });
     }
-    pub fn clone_car<T: Car>(&self) -> T {
-        self.cars.find_copy(type_of::<T>()).expect("yard hump didn't specify \
-                                                   read access to this car")
+    pub fn clone_car<T: Any>(&self) -> T {
+        self.cars.find_copy(type_id::<T>()).expect("yard hump didn't specify \
+                                                    read access to this car")
     }
 }
 type BorrowFlag = uint;

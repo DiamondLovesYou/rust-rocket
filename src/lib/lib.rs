@@ -15,7 +15,7 @@
 // You should have received a copy of the GNU Lesser General Public License
 // along with Rust Rocket. If not, see <http://www.gnu.org/licenses/>.
 
-#![crate_id = "rocket#0.1"]
+#![crate_name = "rocket"]
 #![comment = "A Rust project builder"]
 #![license = "GNU/LGPLv3"]
 #![crate_type = "dylib"]
@@ -30,36 +30,29 @@ extern crate glob;
 extern crate term;
 extern crate arena;
 extern crate serialize;
-#[phase(syntax, link)]
+#[phase(plugin, link)]
 extern crate log;
 extern crate green;
-extern crate sqlite = "sqlite3#0.1";
+extern crate sqlite = "sqlite3";
 extern crate bindgen;
 extern crate collections;
 extern crate rustuv;
 extern crate sync;
 extern crate time;
 extern crate url;
+extern crate uuid;
 
 use buildcrate::BuildCrate;
 
 use syntax::ast::{CrateConfig, Name};
-use syntax::diagnostic::{Emitter, Handler};
+use syntax::codemap;
+use syntax::diagnostic::{Emitter, Handler, Level, SpanHandler};
 use std::path::Path;
 use std::str::MaybeOwned;
 use std::rc::{Rc, Weak};
 use rustc::driver::config::CrateType;
 
-pub mod buildcrate;
-pub mod toolchain;
-pub mod user;
-pub mod driver;
-pub mod platform_dep;
-pub mod address;
-pub mod override;
-pub mod workcache;
-pub mod railroad;
-pub mod dep;
+pub use rustc::driver::driver::host_triple;
 
 pub static BUILD_CRATE_FILENAME: &'static str = "build.rs";
 pub static RUSTB_PATH: &'static str = ".rustb";
@@ -68,20 +61,27 @@ pub static DB_EXT: &'static str = "db";
 pub static IN_TREE_BUILD_SUBPATH: &'static str = "build";
 pub static TARGETS_PATH: &'static str = "target";
 
-macro_rules! build_session {
+static BUILD_SUBTARGET_ID: SubtargetId = 0;
+static BUILD_SUBTARGET_NAME: &'static str = "build";
+static HOST_SUBTARGET_ID: SubtargetId = 1;
+static HOST_SUBTARGET_NAME: &'static str = "host";
+static TARGET_SUBTARGET_ID: SubtargetId = 2;
+static TARGET_SUBTARGET_NAME: &'static str = "target";
+
+macro_rules! build_session(
     (
         enum Message {
             $($msg:ident ($($bind:pat),*): ($($ty:ty),*) => $block:block),*
         }
         struct Database {
-            $version:expr,
+            version: $version:expr,
 
             $($db_col:ident : $db_col_ty:ty),*
         }
         struct Session {
             $($sess_col:ident : $sess_col_ty:ty),*
         }
-    ) => {
+    ) => (
         enum Message {
             AddRefMsg,
             // if Some(..), send back the post de-reference ref count.
@@ -90,26 +90,19 @@ macro_rules! build_session {
 
             $($msg ($($ty),*)),*
         }
-        // Stores all persistent data.
-        struct Database {
-            $($db_col : $db_col_ty),*
-        }
+
         // Stores Stuff we don't want (or can't) save to disk.
         struct Session {
-            db:   Database,
+            db:   ::sqlite::Database,
 
             ref_count: uint,
 
             diag: driver::DiagIf,
-
-            
         }
 
         impl Session {
-            fn new_task((port, chan): (Receiver<Message>,
-                                       Sender<Message>),
-                        diag: driver::DiagIf,
-                        rustb: Path) -> Sender<Message> {
+            fn new_task(diag: driver::DiagIf,
+                        rustb: Path) -> SessionIf {
                 tasks::spawn(proc() {
                     
                 })
@@ -132,21 +125,32 @@ macro_rules! build_session {
                 self.chan.send(DropRefMsg(None));
             }
         }
+    );
+)
 
-    }
-}
-
+// These need to go after the build_session macro so they have access to it.
+pub mod buildcrate;
+pub mod toolchain;
+pub mod user;
+pub mod driver;
+pub mod platform_dep;
+pub mod address;
+pub mod override;
+pub mod workcache;
+pub mod railroad;
+//pub mod dep;
+pub mod stats;
 
 struct SilentEmitter;
 
 impl Emitter for SilentEmitter {
     fn emit(&self,
-            _cmsp: Option<(&codemap::CodeMap, Span)>,
+            _cmsp: Option<(&codemap::CodeMap, codemap::Span)>,
             _msg: &str,
             _lvl: Level) {}
     fn custom_emit(&self,
                    _cm: &codemap::CodeMap,
-                   _sp: Span,
+                   _sp: codemap::Span,
                    _msg: &str,
                    _lvl: Level) {}
 }
@@ -155,7 +159,7 @@ pub fn mk_silent_handler() -> Handler {
     use syntax::diagnostic::mk_handler;
     mk_handler(box SilentEmitter)
 }
-pub fn mk_silent_span_handler(cm: @codemap::CodeMap) -> SpanHandler {
+pub fn mk_silent_span_handler(cm: codemap::CodeMap) -> SpanHandler {
     SpanHandler {
         cm: cm,
         handler: mk_silent_handler(),
@@ -178,67 +182,79 @@ fn create_initial_mstr_db(rustb_path: &Path) -> sqlite::Database {
 
 #[deriving(Encodable, Decodable)]
 pub struct Build {
-    addr: AddresserIf,
-
     targets: Vec<Target>,
 
     src_path: Path,
     build_path: Path,
     
-    build_crate: Box<build_crate::Crate>,
+    build_crate: Box<buildcrate::Crate>,
     db: sqlite::Database,
     
     externs: Option<Vec<Extern>>,
-
-    platform: platform::Session,
 }
 
 impl Build {
-    pub fn new_in_tree(src_path: Path) -> Build {
-        let rustb_path = src_path.join(RUSTB_PATH);
-        let build_path = src_path.join(IN_TREE_BUILD_SUBPATH);
-        
-        
-    }
-    pub fn new_out_of_tree(config: Configure) -> Build {
-        build.create_new_target("default".to_string());
+    pub fn new(config: BuildConfigure) -> Build {
+        let BuildConfigure {
+            src_path,
+            build_path,
 
-        build
-    }
+            targets,
+        } = config;
 
-    pub fn configure<TSess: session::Driver>(sess: &TSess,
-                                             config: &session::Configure) -> Build {
-        debug!("configuring `{}` in `{}`",
-               config.src_path.display(),
-               config.build_path.display());
-        let build_crate_path = config.src_path.join(BUILD_CRATE_FILENAME);
-        sess.ensure_dir(config.build_path);
-        sess.ensure_dir(config.rustb_path);
+        let build = Build {
+            src_path: src_path,
+            build_path: build_path,
+
+            targets: match targets {
+                None => Vec::new(),
+                Some(targets) => targets.move_iter()
+                    .map(|target| {
+                        Target {
+                            id: 0,
+                            name: target.name,
+
+                            custom_subtargets: Vec::new(),
+                            build_subtarget: target.build_triple.map(|build| {
+                                Subtarget {
+                                    id:   BUILD_SUBTARGET_ID,
+                                    name: BUILD_SUBTARGET_NAME,
+
+                                    triple: build,
+                                }
+                            }),
+                            host_subtarget:  target.host_triple.map(|host| {
+                                Subtarget {
+                                    id:   HOST_SUBTARGET_ID,
+                                    name: HOST_SUBTARGET_NAME,
+
+                                    triple: host,
+                                }
+                            }),
+
+                            triple: target.target_triple.unwrap_or_else(|| {
+                                host_triple().to_string()
+                            }),
+                        }
+                    })
+                    .collect()
+            }
+        };
+
+        let mut id = 0;
+        for target in build.targets.mut_iter() {
+            target.id = id;
+            id += 1;
+        }
 
         let db = create_initial_mstr_db(&config.rustb_path);
         assert!(db.exec(format!("INSERT INTO build (src_path) VALUES (\"{}\")",
                                 config.src_path)).expect())
 
-        let mut build = Build {
-            src_path: config.src_path.clone(),
-            build_path: config.build_path.clone(),
-            rustb_path: config.rustb_path.clone(),
-            
-            build_crate: build_crate::new(sess, config.src_path),
-            db: db,
-
-            externs: None,
-            
-            targets: Vec::new(),
-        };
-
-        if config.create_default_target() {
-            let target_sess = session::Target::new();
-            build.create_target(target_sess);
-        }
+        build
     }
 
-    pub fn load<TSess: session::Driver>(sess: &TSess, path: &Path) -> Option<Build> {
+    pub fn load(path: &Path) -> Option<Build> {
         let db_path = path.join_many([RUSTB_PATH, RUSTB_DB_FILENAME]);
         
     }
@@ -269,36 +285,27 @@ impl Build {
         }
     }
 }
-pub trait Configure {
-    /// configures a-fresh in a new build dir or reruns configure in an existing dir.
-    fn configure(&mut self,
-                 src_path: &Path,
-                 build_path: &Path,
-                 diag_handler: &diagnostic::Handler);
-}
-impl Configure for Option<Build> {
-    fn configure(&mut self,
-                 src_path: &Path,
-                 build_path: &Path,
-                 diag_handler: &diagnostic::Handler) {
-        match self {
-            Some(ref mut build) => {
-                // re-configure:
+pub struct BuildConfigure {
+    src_path: Path,
+    build_path: Path,
 
-                
-            }
-            None => {
-                // fresh configure:
-
-            }
-        }
-    }
+    // Use Some with an empty Vec to configure no targets.
+    targets: Option<Vec<TargetConfigure>>,
 }
+pub struct TargetConfigure {
+    name: String,
+
+    build_triple:  Option<MachineTriple>,
+    host_triple:   Option<MachineTriple>,
+    target_triple: Option<MachineTriple>,
+}
+
 pub type TargetId = uint;
 pub type SubtargetId = uint;
 
 // Note Target is also a subtarget; specifically, it's the target's target
 pub struct Target {
+    id: TargetId,
     name: String,
 
     custom_subtargets: Vec<Subtarget>,
@@ -321,12 +328,10 @@ impl Target {
 }
 
 pub struct Subtarget {
-    id: u64,
+    id: SubtargetId,
     name: Name,
 
     triple: MachineTriple,
-
-    crates: Vec<Address>,
 }
 impl Subtarget {
 }

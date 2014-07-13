@@ -18,7 +18,7 @@
 use std::path::Path;
 use address::Address;
 use std::comm::{Sender, Receiver};
-use std::unstable::dynamic_lib::DynamicLibrary;
+use std::dynamic_lib::DynamicLibrary;
 use syntax::crateid::CrateId;
 use syntax::ast;
 use collections::TreeSet;
@@ -27,6 +27,10 @@ use override::{Origin, DefaultOrigin, SpanOrigin};
 use driver::session;
 use super::BUILD_CRATE_FILENAME;
 use super::{SubtargetEsk};
+
+pub mod builtin_build;
+pub mod load;
+pub mod rtio_wrapper;
 
 static PROJECT_SOURCE_PATH: &'static str = "src";
 static VERSION_ATTR: &'static str = "rocket_version";
@@ -67,20 +71,12 @@ pub struct LoadedBuildCrate {
     dylib: DynamicLibrary,
 
 }
-pub struct BuildCrate {
-    // the newest timestamp from all files used in the build crate (including
-    // the build crate itself).
-    ts: u64,
-    src_paths: Vec<Path>,
-    // path to the built dylib:
-    path: Path,
 
-}
 impl BuildCrate {
-    pub fn configure<TSess: session::Session, TSub: SubtargetEsk>(sess: &TSess,
-                                                                  src_path: &Path,
-                                                                  rustb_path: &Path,
-                                                                  sub: &TSub) -> BuildCrate {
+    pub fn configure<TSub: SubtargetEsk>(sess: &session::Session,
+                                         src_path: &Path,
+                                         rustb_path: &Path,
+                                         sub: &TSub) -> BuildCrate {
         use rustc::driver::config::{FullDebugInfo, CrateTypeDylib};
         use rustc::driver::driver::FileInput;
         use rustc::driver::config::{basic_options, build_configuration};
@@ -93,14 +89,6 @@ impl BuildCrate {
             // TODO: overrides
             // TODO: build crate injections (for example, for use in Rust proper
             // in the bootstrapping binary).
-
-            let mut bk = BuildCrate {
-                ts: 0,
-                src_paths: Vec::new(),
-
-                path: build_crate_path.clone(),
-
-            };
 
             let mut rc_sess = build_session({
                 let mut opts = basic_options();
@@ -121,7 +109,7 @@ impl BuildCrate {
     }
 }
 
-pub fn check_version<TSess: session::Session>(sess: &TSess, krate: &ast::Crate) {
+pub fn check_version(sess: &session::Session, krate: &ast::Crate) {
     use syntax::attr::AttrMetaMethods;
     let vers: Vec<ast::Attribute> = krate.attrs.iter()
         .filter(|attr| attr.check_name(VERSION_ATTR) )

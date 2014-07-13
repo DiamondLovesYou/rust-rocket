@@ -202,13 +202,15 @@ impl Overridable for ArgumentValues {
         }
     }
 }
+
+// The key of the override.
 #[deriving(Encodable, Decodable, Hash, Clone, Eq)]
 pub enum Override {
     ArgOverride(ToolId, MultiSet<String>),
     ToolOverride(ToolId, Path),
     CrateOverride(CrateId),
     RustCfgOverride,
-    CodegenOverride(String),
+    CodegenOverride,
 }
 
 #[deriving(Encodable, Decodable, Hash, Clone)]

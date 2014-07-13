@@ -21,17 +21,17 @@ use syntax::crateid::CrateId;
 use std::io;
 use std::comm;
 use std::comm::{Receiver, Sender};
-use std::container;
+use std::collections;
 use std::io::{fs, FileStat, IoResult};
 use std::collections::{HashSet, HashMap};
-use sync::Future;
+use std::sync::Future;
 
 use address::{Address, CratePhase};
 use railroad::YardId;
 use super::super::{TargetId, SubtargetId};
 
 use super::diagnostics;
-use super::{DiagIf, DepIf, WorkCacheIf};
+use super::{DiagIf, WorkCacheIf};
 
 // Interfaces:
 // FIXME(diamond): add supervisors.
@@ -51,7 +51,7 @@ pub enum StaleDataset<TSet> {
 pub trait IsStale {
     fn is_stale(&self, path: &Path) -> bool;
 }
-impl<TMap: container::Map<Path, TMV>, TMV> StaleDataset {
+impl<TMap: collections::Map<Path, TMV>, TMV> StaleDataset {
     pub fn is_set_stale(&self, path: &Path) -> bool {
         match self {
             &AllStaleDataset => true,
@@ -59,7 +59,7 @@ impl<TMap: container::Map<Path, TMV>, TMV> StaleDataset {
         }
     }
 }
-impl<TSet: container::Set<Path>> StaleDataset {
+impl<TSet: collections::Set<Path>> StaleDataset {
     pub fn is_map_stale(&self, path: &Path) -> bool {
         match self {
             &AllStaleDataset => true,
@@ -302,16 +302,16 @@ pub struct TargetIf;
 pub struct Session {
     diag:       diagnostics::SessionIf,
     freshness:  FreshnessIf,
-    dep:        DepIf,
+//    dep:        DepIf,
     workcache:  WorkCacheIf,
 }
 impl Session {
     pub fn freshness<'a>(&'a self) -> &'a FreshnessIf {
         self.freshness
     }
-    pub fn dep<'a>(&'a self) -> &'a DepIf {
+    /*pub fn dep<'a>(&'a self) -> &'a DepIf {
         self.dep
-    }
+    }*/
     pub fn workcache<'a>(&'a self) -> &'a WorkCacheIf {
         self.workcache
     }
@@ -354,11 +354,13 @@ pub struct Router {
     addr: Address,
 
     diag:   diagnostics::SessionIf,
-    dep:    DepIf,
+//    dep:    DepIf,
     wc:     WorkCacheIf,
     //build:  build_crate::SessionIf,
 }
 impl Router {
+    pub fn address<'a>(&'a self) -> &'a Address { &self.address }
+
     pub fn incr_yard(&mut self, yard: YardId) {
         self.address = self.address.with_yard_suffex(yard);
     }
@@ -372,14 +374,5 @@ impl Router {
     }
     pub fn report_fs_deps(&self, files: Vec<Path>) {
         self.dep.report_fs_deps(self.addr.clone(), files)
-    }
-}
-impl Session for Router {
-
-    fn target_id(&self) -> TargetId {
-        self.addr.target_id().expect("this address should always have a target prefix")
-    }
-    fn subtarget_id(&self) -> SubtargetId {
-        self.addr.subtarget_id().expect("this address should always have a subtarget prefix")
     }
 }

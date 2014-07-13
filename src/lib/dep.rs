@@ -15,19 +15,35 @@
 // You should have received a copy of the GNU Lesser General Public License
 // along with Rust Rocket. If not, see <http://www.gnu.org/licenses/>.
 
+use std::collections::HashMap;
+use std::comm::{Sender, Receiver};
+
+use syntax::crateid::CrateId;
+
 use address::Address;
+
+/*build_session!(
+    enum Message {
+        ReportDepMessage(addr, dep): (Address, Dep) => {
+        }
+    }
+    struct Database {
+        version: 0,
+
+        
+    }
+)*/
 
 pub enum Phase {
     SyntaxPhase,
     LinkPhase,
 }
 enum Message {
-    Startup(Port<Message>),
     AddIfRefMessage,
     DropIfRefMessage,
     
     // async
-    ReportDepMessage(address::Address,  // suffexed with the yard from whence it came.
+    ReportDepMessage(Address,  // suffexed with the yard from whence it came.
                      Dep),
     
 }
@@ -40,7 +56,7 @@ enum Dep {
 enum Locus {
     // A rustb build
     BuildLocus(Path,   // path to .rustb/
-               ~str),  // target name
+               String),  // target name
 
     
 }

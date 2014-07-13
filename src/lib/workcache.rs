@@ -15,23 +15,33 @@
 // You should have received a copy of the GNU Lesser General Public License
 // along with Rust Rocket. If not, see <http://www.gnu.org/licenses/>.
 
+// TODO: sqlite.
+
+use std;
 use std::comm::{Receiver, Sender};
-use std::io;
-use std::io::{ChanReader, ChanWriter, IoResult};
+use std::{io, iter, default, rand, clone, ops};
+use std::io::{ChanReader, ChanWriter, IoResult, IoError, Open, ReadWrite, Write};
+use std::io::fs::File;
 use std::hash::sip::SipState;
+use std::hash::Hash;
+use std::collections::{HashMap, RingBuf};
+use std::sync::Future;
+use serialize::{Encodable, Decodable};
+use serialize::{ebml, json};
 
 use address::Address;
 use override::Overrides;
+use TargetId;
 
 // singleton task POV
 enum Message {
     AddIfRefMsg,
     // if Some(..), send back the post de-reference ref count.
     // used during shutdown to assert there are no more refs.
-    DropIfRefMsg(Option<Chan<u64>>),
+    DropIfRefMsg(Option<Sender<u64>>),
     
     // sends back true if the work was identical to existing work.
-    CacheMsg(Chan<CachingResult>, Port<Vec<u8>>, Key),
+    CacheMsg(Sender<CachingResult>, Receiver<Vec<u8>>, Key),
     
     HelperFinishedCachingMsg(HelperCachingResult),
 }
@@ -40,13 +50,12 @@ pub type CachingResult = IoResult<(KeyId, bool)>;
 struct HelperCachingResult {
     hif: HelperIf,
     result: IoResult<(KeyId, Entry)>,
-    ret: Chan<CachingResult>,
+    ret: Sender<CachingResult>,
 }
 
 pub trait CachableWork: Encodable + Decodable + Hash {}
 
-#[deriving(Encodable, Decodable, Hash, Clone, Eq)]
-pub struct Key(SourceAddress, Overrides);
+pub type Key = Address;
 
 /// a more light-weight key into the cache.
 #[deriving(Encodable, Decodable, Hash, Clone, Eq)]
@@ -89,7 +98,7 @@ struct Session {
     work:    RingBuf<HelperWork>,
 }
 impl Session {
-    fn new((port, chan): (Port<Message>, Chan<Message>),
+    fn new((port, chan): (Receiver<Message>, Sender<Message>),
            wc_db_path: &Path, artifact_path: &Path) -> IoResult<SessionIf> {
         let mut file = try!(File::open_mode(wc_db_path, Open, ReadWrite));
 
@@ -162,8 +171,8 @@ impl Session {
 
 
     fn hdl_cache_msg(&mut self,
-                     client_ret: Chan<CachingResult>,
-                     incoming: Port<~[u8]>,
+                     client_ret: Sender<CachingResult>,
+                     incoming: Receiver<Vec<u8>>,
                      key: Key) {
         let kid = self.record_hash_key(key);
         let work = HelperWork {
@@ -232,12 +241,12 @@ impl Session {
         }
     }
 
-    fn task(&mut self, port: Port<Message>) {
+    fn task(&mut self, port: Receiver<Message>) {
         /// FIXME: tune this.
         static HELPER_COUNT: uint = std::rt::default_sched_threads();
 
         for _ in iter::range(0, HELPER_COUNT) {
-            let hif = HelperSession::new(Chan::new(), self.db.hash_keys.clone());
+            let hif = HelperSession::new(channel(), self.db.hash_keys.clone());
             self.helpers.push_back(hif);
         }
 
@@ -245,7 +254,7 @@ impl Session {
     }
 }
 struct HelperSession {
-    port: Port<HelperWork>,
+    port: Receiver<HelperWork>,
     hasher: SipState,
 }
 impl HelperSession {
@@ -255,7 +264,7 @@ impl HelperSession {
         }
     }
 
-    fn new((port, chan): (Port<HelperWork>, Chan<HelperWork>),
+    fn new((port, chan): (Receiver<HelperWork>, Sender<HelperWork>),
            (key0, key1): (u64, u64)) -> HelperIf {
         spawn(proc() {
                 let mut sess = HelperSession {
@@ -272,11 +281,11 @@ impl HelperSession {
 }
 struct HelperWork {
     key: KeyId,
-    ret: Chan<Message>,
-    client_ret: Chan<CachingResult>,
+    ret: Sender<Message>,
+    client_ret: Sender<CachingResult>,
     path: Path,
     prev_entry: Option<Entry>,
-    recv: Port<Vec<u8>>,
+    recv: Receiver<Vec<u8>>,
 
     /// when in-queue, this is None. At the conclusion of work,
     /// the helper sends the interface back with the result.
@@ -367,7 +376,7 @@ impl default::Default for HelperFlags {
 /// we are sending the IF through the IF its encapsulating.
 #[deriving(Clone)]
 struct HelperIf {
-    chan: Chan<HelperWork>,
+    chan: Sender<HelperWork>,
 }
 impl HelperIf {
     
@@ -376,34 +385,32 @@ impl HelperIf {
 #[deriving(Clone)]
 pub struct SessionIf {
     /// the chan to the global workcache task
-    chan: Chan<Message>,
+    chan: Sender<Message>,
 }
 impl SessionIf {
     
     // starts the global workcache task and returns the seeding interface
     pub fn new(db: &Path,
                artifact: &Path) -> IoResult<SessionIf> {
-        Session::new(Chan::new(), db, artifact)
+        Session::new(Sender::new(), db, artifact)
     }
 
     pub fn cache_cargo<T: Encodable>(&self,
-                                     address: address::SourceAddress,
-                                     overrides: override::Overrides,
+                                     address: Address,
                                      cargo: T) -> Future<CachingResult> {
         static SEND_BUFFER_BYTES: uint = 1024;
-        let key = Key(address, overrides);
-        let (port, chan) = Chan::new();
-        let (ret, ret_chan) = Chan::new();
-        self.chan.send(CacheMsg(ret, port, key));
+        let (port, chan) = channel();
+        let (ret, ret_chan) = channel();
+        self.chan.send(CacheMsg(ret, port, address));
         
         let mut writer = io::BufferedWriter::with_capacity(SEND_BUFFER_BYTES,
                                                            io::ChanWriter::new(chan));
         {
-            let mut encoder = json::Encoder::new(&mut writer as &mut Writer);
+            let mut encoder = ebml::writer::Encoder::new(&mut writer as &mut Writer);
             cargo.encode(&mut encoder);
         }
         writer.flush();
-        Future::from_port(ret)
+        Future::from_receiver(ret)
     }
 }
 impl clone::Clone for SessionIf {
@@ -414,7 +421,7 @@ impl clone::Clone for SessionIf {
         }
     }
 }
-impl drop::Drop for SessionIf {
+impl ops::Drop for SessionIf {
     fn drop(&mut self) {
         self.chan.send(DropIfRefMsg(None));
     }
