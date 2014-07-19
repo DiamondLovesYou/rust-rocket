@@ -207,8 +207,8 @@ impl HumpCache {
         self.writes.clone()
     }
 }
-pub type HumpPush = |CargoKey, Classification|;
-pub type Hump = fn(push: HumpPush);
+//pub type HumpPush = |CargoKey, Classification|;
+pub type Hump = fn(push: |CargoKey, Classification|);
 pub type YardId = uint;
 
 #[deriving(Encodable, Decodable)]

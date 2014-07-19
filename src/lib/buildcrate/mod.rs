@@ -24,18 +24,15 @@ use syntax::ast;
 use collections::TreeSet;
 use rustc;
 use override::{Origin, DefaultOrigin, SpanOrigin};
-use driver::session;
+use driver::{session, diagnostics};
 use super::BUILD_CRATE_FILENAME;
-use super::{SubtargetEsk};
+use super::{SubtargetEsk, Build};
 
-pub mod builtin_build;
+pub mod build;
 pub mod load;
 pub mod rtio_wrapper;
 
 static PROJECT_SOURCE_PATH: &'static str = "src";
-static VERSION_ATTR: &'static str = "rocket_version";
-// the version we expect from a compiled build crate.
-static COMPILED_VERSION: uint = 0;
 
 enum Message {
     
@@ -62,80 +59,27 @@ pub struct Crate {
     path_ts: u64,
 
     id: CrateId,
-    deps: TreeSet<CrateId>,
+    deps: Vec<CrateId>,
 }
-impl Crate {
-    
+pub struct BuildCrate {
+    path: Path,
+    dylib: Option<DynamicLibrary>,
 }
-pub struct LoadedBuildCrate {
-    dylib: DynamicLibrary,
-
-}
-
 impl BuildCrate {
-    pub fn configure<TSub: SubtargetEsk>(sess: &session::Session,
-                                         src_path: &Path,
-                                         rustb_path: &Path,
-                                         sub: &TSub) -> BuildCrate {
-        use rustc::driver::config::{FullDebugInfo, CrateTypeDylib};
-        use rustc::driver::driver::FileInput;
-        use rustc::driver::config::{basic_options, build_configuration};
-        use rustc::driver::driver::{phase_1_parse_input};
-        use rustc::driver::session::build_session;
+    pub fn configure<TTarget: SubtargetEsk>(build: &Build,
+                                            target: &TTarget) -> BuildCrate {
 
-        let build_crate_path = src_path.join(BUILD_CRATE_FILENAME);
+        let build_crate_path = build.src_path.join(BUILD_CRATE_FILENAME);
         if build_crate_path.exists() {
             // build the build crate as a dylib
             // TODO: overrides
             // TODO: build crate injections (for example, for use in Rust proper
             // in the bootstrapping binary).
 
-            let mut rc_sess = build_session({
-                let mut opts = basic_options();
-                opts.crate_types = vec!(CrateTypeDylib);
-                opts.debuginfo = FullDebugInfo;
-                opts
-            },
-                                         Some(build_crate_path.clone()));
-            let cfg = build_configuration(&sess);
-            let input = FileInput(build_crate_path.clone());
-            let krate = phase_1_parse_input(&sess, cfg, &input);
-
-            // TODO: ask Cargo to resolve extern crates used by the build crate.
-
-            check_version(sess, &krate);
-        } else /* !build_crate_path.exists() */ {
+        } else {
+            diagnostics().fatal(DefaultOrigin,
+                                "for the time begin, Rocket requires a build crate TODO");
         }
-    }
-}
-
-pub fn check_version(sess: &session::Session, krate: &ast::Crate) {
-    use syntax::attr::AttrMetaMethods;
-    let vers: Vec<ast::Attribute> = krate.attrs.iter()
-        .filter(|attr| attr.check_name(VERSION_ATTR) )
-        .collect();
-    if vers.len() > 1 {
-        for i in vers.move_iter() {
-            sess.error(SpanOrigin(i.span),
-                       "multiple Rocket version attributes provided");
-        }
-        sess.abort_if_errors();
-    } else if vers.len() == 0 {
-        sess.fatal(DefaultOrigin,
-                   format!("missing \\#![rocket_version = \"{}\"]",
-                           VERSION_ATTR));
-    } else if vers[0].value_str().is_none() {
-        sess.fatal(SpanOrigin(vers[0].span),
-                   "incorrect rocket_version attribute");
-    }
-    let ver = vers[0].value_str().unwrap();
-    if ver != VERSION_ATTR {
-        sess.error(SpanOrigin(vers[0].span),
-                   "Rocket is, at the moment, experimental. At present,
-                    no backward compatibility is available.");
-        sess.note(DefaultOrigin,
-                  "Backward compatibility will begin at 1.0");
-        sess.abort_if_errors();
     }
 }
 

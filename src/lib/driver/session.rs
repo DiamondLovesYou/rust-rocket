@@ -51,7 +51,7 @@ pub enum StaleDataset<TSet> {
 pub trait IsStale {
     fn is_stale(&self, path: &Path) -> bool;
 }
-impl<TMap: collections::Map<Path, TMV>, TMV> StaleDataset {
+impl<TMap: collections::Map<Path, TMV>, TMV> StaleDataset<TMap> {
     pub fn is_set_stale(&self, path: &Path) -> bool {
         match self {
             &AllStaleDataset => true,
@@ -59,7 +59,7 @@ impl<TMap: collections::Map<Path, TMV>, TMV> StaleDataset {
         }
     }
 }
-impl<TSet: collections::Set<Path>> StaleDataset {
+impl<TSet: collections::Set<Path>> StaleDataset<TSet> {
     pub fn is_map_stale(&self, path: &Path) -> bool {
         match self {
             &AllStaleDataset => true,
@@ -314,38 +314,6 @@ impl Session {
     }*/
     pub fn workcache<'a>(&'a self) -> &'a WorkCacheIf {
         self.workcache
-    }
-
-    pub fn ensure_dir(&self, dir: &Path) {
-        if dir.exists() {
-            match io::fs::lstat(dir) {
-                Ok(FileStat { perm: perm, .. }) if perm & io::UserRWX == io::UserRWX => {},
-                Ok(FileStat { perm: perm, .. }) => {
-                    match io::fs::chmod(dir, perm | io::UserRWX) {
-                        Ok(()) => {},
-                        Err(e) => {
-                            self.fatal(format!("couldn't chmod directory {}: {}",
-                                               dir.display(),
-                                               e))
-                        }
-                    }
-                }
-                Err(e) => {
-                    self.fatal(format!("couldn't lstat directory {}: {}",
-                                       dir.display(),
-                                       e))
-                }
-            }
-        } else {
-            match io::fs::mkdir_recursive(dir, io::UserRWX) {
-                Ok(()) => {},
-                Err(e) => {
-                    self.fatal(format!("couldn't create directory {}: {}",
-                                       dir.display(),
-                                       e));
-                }
-            }
-        }
     }
 }
 

@@ -22,6 +22,7 @@
 #![crate_type = "rlib"]
 
 #![feature(phase, managed_boxes, struct_variant, macro_rules)]
+#![feature(default_type_params)]
 
 extern crate syntax;
 extern crate rustc;
@@ -45,8 +46,9 @@ extern crate uuid;
 use buildcrate::BuildCrate;
 
 use syntax::ast::{CrateConfig, Name};
-use syntax::codemap;
+use syntax::{codemap, crateid};
 use syntax::diagnostic::{Emitter, Handler, Level, SpanHandler};
+use std::fmt;
 use std::path::Path;
 use std::str::MaybeOwned;
 use std::rc::{Rc, Weak};
@@ -54,9 +56,11 @@ use rustc::driver::config::CrateType;
 
 pub use rustc::driver::driver::host_triple;
 
+use override::Origin;
+
 pub static BUILD_CRATE_FILENAME: &'static str = "build.rs";
-pub static RUSTB_PATH: &'static str = ".rustb";
-pub static MSTR_DB_FILENAME: &'static str = "master.db";
+pub static ROCKET_PATH: &'static str = ".rocket";
+pub static DB_FILENAME: &'static str = "master.db";
 pub static DB_EXT: &'static str = "db";
 pub static IN_TREE_BUILD_SUBPATH: &'static str = "build";
 pub static TARGETS_PATH: &'static str = "target";
@@ -170,7 +174,7 @@ static INITIAL_MSTR_DB: &'static [u8] = include_bin!("master.db");
 
 fn create_initial_mstr_db(rustb_path: &Path) -> sqlite::Database {
     use std::io::{File, Open, ReadWrite};
-    let mstr_db_f = rustb_path.join(MSTR_DB_FILENAME);
+    let mstr_db_f = rustb_path.join(DB_FILENAME);
     {
         let file = File::open_mode(&mstr_db_f, Open, ReadWrite).expect();
         file.write(INITIAL_MSTR_DB);
@@ -255,33 +259,63 @@ impl Build {
     }
 
     pub fn load(path: &Path) -> Option<Build> {
-        let db_path = path.join_many([RUSTB_PATH, RUSTB_DB_FILENAME]);
+        let db_path = path.join_many([ROCKET_PATH, DB_FILENAME]);
         
     }
 
     pub fn create_target(&mut self,
-                         sess: &TSess,
-                         tsess: session::Target) {
-        let target = Target {
-            name: sess.name,
-            custom_subtargets: Vec::new(),
-            build_subtarget: None,
-            host_subtarget: None,
-            mach: sess.mach,
-            path: self.targets_path.join(sess.name),
-        };
+                         config: TargetConfigure) -> TargetId {
+        let target = config.configure(self);
 
-        sess.ensure_dir(self.targets_path);
-        sess.ensure_dir(target.path);
+        self.ensure_dir(self.targets_path);
+        self.ensure_dir(target.path);
         self.targets.push(target);
     }
     pub fn build(&mut self,
-                 sess: &session::SessionIf,
                  target: Vec<String>) {
         for t in self.targets
             .mut_iter()
             .filter(|t| target.is_none() || t.name == target.unwrap() ) {
-            t.build(sess, self);
+            t.build(self);
+        }
+    }
+
+    // ensures dir exists within the build dir.
+    pub fn ensure_dir(&self, dir: &Path) {
+        use std::io::fs::{lstat, chmod, mkdir_recursive};
+        use std::io;
+        use std::io::{FileStat};
+
+        assert!(dir.is_relative());
+        let dir = self.build_path.join(dir);
+        if dir.exists() {
+            match lstat(dir) {
+                Ok(FileStat { perm: perm, .. }) if perm & io::UserRWX == io::UserRWX => {},
+                Ok(FileStat { perm: perm, .. }) => {
+                    match chmod(dir, perm | io::UserRWX) {
+                        Ok(()) => {},
+                        Err(e) => {
+                            self.fatal(format!("couldn't chmod directory {}: {}",
+                                               dir.display(),
+                                               e))
+                        }
+                    }
+                }
+                Err(e) => {
+                    self.fatal(format!("couldn't lstat directory {}: {}",
+                                       dir.display(),
+                                       e))
+                }
+            }
+        } else {
+            match mkdir_recursive(dir, io::UserRWX) {
+                Ok(()) => {},
+                Err(e) => {
+                    self.fatal(format!("couldn't create directory {}: {}",
+                                       dir.display(),
+                                       e));
+                }
+            }
         }
     }
 }
@@ -298,6 +332,11 @@ pub struct TargetConfigure {
     build_triple:  Option<MachineTriple>,
     host_triple:   Option<MachineTriple>,
     target_triple: Option<MachineTriple>,
+}
+impl TargetConfigure {
+    pub fn configure(&self, build: &Build) -> Target {
+        
+    }
 }
 
 pub type TargetId = uint;
@@ -316,9 +355,8 @@ pub struct Target {
     triple: MachineTriple,
 }
 impl Target {
-    pub fn build<TSess: session::Session>(&mut self,
-                                          sess: &TSess,
-                                          build: &Build) {
+    pub fn build(&mut self,
+                 build: &Build) {
         if self.crates.len() == 0 {
             
         } else {
@@ -329,7 +367,7 @@ impl Target {
 
 pub struct Subtarget {
     id: SubtargetId,
-    name: Name,
+    name: String,
 
     triple: MachineTriple,
 }
@@ -340,37 +378,21 @@ pub trait SubtargetEsk {
     fn address_prefix(&self) -> address::Prefix;
 
     fn triple<'a>(&'a self) -> &'a MachineTriple;
+
+    fn build_default_config(&self) -> CrateConfig {
+        
+    }
 }
 
 pub struct Extern {
-    crate_id: crateid::CrateId,
-    dir: Path,
-    build_crate: build_crate::Crate,
+    src_path: Path,
+    buildcrate: buildcrate::Crate,
 }
 
-pub struct Crate {
-    id: Option<CrateId>,
-    file: Path,
-}
-
-pub trait ItemUse {
-    // Is this resource available for use?
-    fn is_available(&self) -> bool;
-
-    // Is this resource locally managed? As in, are we resonsible for rebuilding
-    // if stale? If not, we only concern ourselfs with its outputs.
-    fn is_locally_managed(&self) -> bool;
-
-    // Are this resource's rebuilds contained? ie do we need to rebuild all items
-    // depending on this if this is rebuilt?
-    fn are_rebuilds_contained(&self) -> bool;
-
-    fn with_outputs<U>(&self, f: |&[Item]| -> U) -> U;
-}
 
 pub struct MachineTriple(String);
 impl fmt::Show for MachineTriple {
-    fn fmt(&self, fmt: &mut Formatter) -> fmt::Result {
+    fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
         let &MachineTriple(ref inner) = self;
         inner.fmt(fmt)
     }
@@ -395,7 +417,8 @@ pub struct Preferences {
     trans_stats: Option<bool>,
    
 }
-pub fn early_error(msg: &str) -> ! {
-    diagnostic::DefaultEmitter.emit(None, msg, diagnostic::Fatal);
-    fail!(diagnostic::FatalError);
+
+// Takes an Origin in addition for diagnostics.
+pub trait FromStrWithOrigin {
+    fn from_str_with_origin(s: &str, origin: Origin) -> Option<Self>;
 }

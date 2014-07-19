@@ -27,6 +27,8 @@ use std::hash::Hash;
 use std::collections::{HashMap, RingBuf};
 use std::sync::Future;
 use serialize::{Encodable, Decodable};
+use serialize::ebml::reader::Decoder;
+use serialize::ebml::writer::Encoder;
 use serialize::{ebml, json};
 
 use address::Address;
@@ -52,8 +54,9 @@ struct HelperCachingResult {
     result: IoResult<(KeyId, Entry)>,
     ret: Sender<CachingResult>,
 }
-
-pub trait CachableWork: Encodable + Decodable + Hash {}
+pub type EbmlEncoder<'a> = Encoder<'a, io::BufferedWriter<io::ChanWriter>>;
+pub type EbmlDecoder<'a> = Decoder<'a>;
+pub trait CachableWork<'a>: Encodable<EbmlEncoder<'a>, IoError> + Decodable<Decoder<'a>, IoError> + Hash {}
 
 pub type Key = Address;
 
@@ -382,7 +385,6 @@ impl HelperIf {
     
 }
 
-#[deriving(Clone)]
 pub struct SessionIf {
     /// the chan to the global workcache task
     chan: Sender<Message>,
@@ -395,9 +397,9 @@ impl SessionIf {
         Session::new(Sender::new(), db, artifact)
     }
 
-    pub fn cache_cargo<T: Encodable>(&self,
-                                     address: Address,
-                                     cargo: T) -> Future<CachingResult> {
+    pub fn cache_cargo<'a, T: CachableWork<'a>>(&self,
+                                                address: Address,
+                                                cargo: T) -> Future<CachingResult> {
         static SEND_BUFFER_BYTES: uint = 1024;
         let (port, chan) = channel();
         let (ret, ret_chan) = channel();

@@ -26,12 +26,14 @@ use override::Origin;
 use address::Address;
 
 pub trait Driver {
-    fn fatal(&self, origin: Origin, msg: &str) -> !;
-    fn err(&self, origin: Origin, msg: &str);
-    fn warn(&self, origin: Origin, msg: &str);
-    fn info(&self, origin: Origin, msg: &str);
+    fn fatal<M: Str>(&self, origin: Origin, msg: M) -> !;
+    fn err<M: Str>(&self, origin: Origin, msg: M);
+    fn warn<M: Str>(&self, origin: Origin, msg: M);
+    fn info<M: Str>(&self, origin: Origin, msg: M);
     fn fail_if_errors(&self);
 }
+
+struct ExpectedFailure;
 
 enum Message {
     AddIfRef,
@@ -82,7 +84,6 @@ impl Session {
 #[deriving(Clone)]
 pub struct SessionIf {
     chan: Sender<Message>,
-    addr: Address,
 }
 
 impl SessionIf {
@@ -96,7 +97,6 @@ impl SessionIf {
         });
         SessionIf {
             chan: chan,
-            addr: Default::default(),
         }
     }
     pub fn emitter(&self) -> EmitterWriter {
@@ -108,9 +108,25 @@ impl SessionIf {
         self.chan.send_opt(msg);
         chan.recv()
     }
-    pub fn abort_if_errors(&self) {
+    // An expected failure.
+    pub fn fail(&self) -> ! {
+        fail!(ExpectedFailure)
+    }
+}
+impl Driver for SessionIf {
+    fn fatal<M: Str>(&self, origin: Origin, msg: M) -> ! {
+        
+    }
+    fn err<M: Str>(&self, origin: Origin, msg: M) {
+    }
+    fn warn<M: Str>(&self, origin: Origin, msg: M) {
+    }
+    fn info<M: Str>(&self, origin: Origin, msg: M) {
+        
+    }
+    pub fn fail_if_errors(&self) {
         if self.errors() != 0 {
-            fail!();
+            self.fail();
         }
     }
 }

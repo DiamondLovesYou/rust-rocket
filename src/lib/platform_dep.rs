@@ -19,25 +19,30 @@ use std::path::Path;
 use std::collections::HashMap;
 use std::cell::RefCell;
 
+use driver::diagnostics;
+use override::Origin;
+
 #[deriving(Encodable, Decodable)]
 pub struct Session {
     tools: HashMap<ToolId, Path>,
 
     libs: HashMap<String, Path>,
 }
-#[deriving(Encodable, Decodable)]
+#[deriving(Hash, Encodable, Decodable, Clone, Eq, PartialEq)]
 pub enum CCompilerType {
-    Gcc,
-    Clang,
+    GccCC,
+    ClangCC,
 }
-#[deriving(Hash, Encodable, Decodable)]
+
+#[deriving(Hash, Encodable, Decodable, Clone, Eq, PartialEq)]
 pub enum ToolId {
-    CCompilerTool(CCompilerType),
-    CXXCompilerTool(CCompilerType),
+    CCompilerTool(Option<CCompilerType>),
+    CXXCompilerTool(Option<CCompilerType>),
     LDLinkerTool,
     ARArchiverTool,
     PythonTool(uint), // version 2 or 3.
     GdbTool,
+    LldbTool,
     PerlTool,
     ValgrindTool,
     PerfTool,
@@ -55,6 +60,52 @@ pub enum ToolId {
     AdbTool,
 
     // Platform tool X goes here; don't be shy.
+    CustomTool(String),
+}
+
+impl ::FromStrWithOrigin for ToolId {
+    fn from_str_with_origin(s: &str, origin: Origin) -> Option<ToolId> {
+        Some(match s {
+            // Prefer these:
+            "cc"      => CCompilerTool(None),
+            "c++"     => CXXCompilerTool(None),
+            // to these:
+            "clang"   => CCompilerTool(Some(ClangCC)),
+            "clang++" => CXXCompilerTool(Some(ClangCC)),
+            "gcc"     => CCompilerTool(Some(GccCC)),
+            "g++"     => CXXCompilerTool(Some(GccCC)),
+
+            "ld"      => LDLinkerTool,
+            "ar"      => ARArchiverTool,
+
+            "python"  => PythonTool(2),
+            "python3" => PythonTool(3),
+
+            "gdb"     => GdbTool,
+            "lldb"    => LldbTool,
+
+            "perl"    => PerlTool,
+            // valgrind
+            "perf"    => PerfTool,
+            // ISCC
+            "cmake"   => CMakeTool,
+            "git"     => GitTool,
+            // zcat
+            "curl"    => CurlTool,
+            "paxctl"  => PaxCtlTool,
+            "nodejs"  => NodeJsTool,
+            // LuaTex
+            // XeTex
+            // PdfLaTex
+            // PanDoc
+            "adb"     => AdbTool,
+
+            _ => {
+                diagnostics().warn(origin, "unknown tool");
+                CustomTool(s.to_string())
+            }
+        })
+    }
 }
 
 #[deriving(Encodable, Decodable)]

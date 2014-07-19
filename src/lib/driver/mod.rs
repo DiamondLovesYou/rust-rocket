@@ -17,6 +17,8 @@
 
 use syntax::codemap::CodeMap;
 
+use address::Address;
+
 pub mod session;
 pub mod error_codes;
 pub mod diagnostics;
@@ -40,3 +42,15 @@ pub fn diagnostics() -> DiagIf {
         .expect("task diagnostics uninitialized!")
         .clone()
 }
+
+// The thread local address of what we're working on.
+// NOTE: it is expected that this is set checkpoint style, and is otherwise immutable.
+local_data_key!(address_: Address)
+
+
+
+pub fn address() -> &'static Address {
+    address_.get()
+        .expect("task work address uninitialized!")
+}
+

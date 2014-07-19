@@ -17,7 +17,7 @@
 
 use std::path::Path;
 use std::clone::Clone;
-use std::{default, cmp, hash};
+use std::{cmp, default, hash};
 use serialize::{Encodable, Decodable};
 use std::io::Writer;
 use std::collections::hashmap::{HashMap, HashSet};
@@ -26,6 +26,8 @@ use syntax::codemap;
 use syntax::crateid::CrateId;
 use std::u64;
 use url;
+
+use FromStrWithOrigin;
 
 use platform_dep::ToolId;
 use address::Address;
@@ -39,21 +41,89 @@ struct Session {
 }
 
 /// The origin for an override
-#[deriving(Encodable, Decodable, Clone)]
+#[deriving(Encodable, Decodable, Clone, Eq, PartialEq)]
 pub enum Origin {
     DefaultOrigin,
     CliOrigin,
     SpanOrigin(codemap::Span),
 }
+impl default::Default for Origin {
+    fn default() -> Origin {
+        DefaultOrigin
+    }
+}
+
+#[deriving(Encodable, Decodable, Clone, Eq, PartialEq, Default)]
+pub struct Originated<T> {
+    pub node: T,
+    pub origin: Origin,
+}
+// this is here purely to save key strokes.
+pub type Od<T> = Originated<T>;
+pub fn originate<T>(v: T, origin: Origin) -> Originated<T> {
+    Originated {
+        node: v,
+        origin: origin,
+    }
+}
+
+impl<T> Originated<T> {
+    pub fn warn_unused<T: Str>(&self, msg: T) {
+        use driver::diagnostics;
+        diagnostics().warn(self.origin.clone(),
+                           msg)
+    }
+
+    pub fn map<U>(self, f: |T, &Origin| -> U) -> Originated<U> {
+        let Originated {
+            node: node,
+            origin: ref origin,
+        } = self;
+        originate(f(node, origin), origin.clone())
+    }
+}
+impl<T: hash::Hash, S: hash::Writer> hash::Hash<S> for Originated<T> {
+    fn hash(&self, state: &mut S) {
+        state.hash(self.node);
+    }
+}
+impl<T: FromStrWithOrigin> FromStrWithOrigin for Originated<T> {
+    fn from_str_with_origin(s: &str, origin: Origin) -> Option<Originated<T>> {
+        let that: Option<T> =
+            FromStrWithOrigin::from_str_with_origin(s, origin.clone());
+        that.map(|that| originate(that, origin) )
+    }
+}
+
+#[deriving(Encodable, Decodable, Clone, Eq, PartialEq, Hash)]
+pub enum SetOp<T> {
+    AddSK,
+    RemoveSK,
+    // Note this implicitly includes self, ie the value that replaces.
+    ReplaceSK(HashSet<Od<TagOrValueKey<T>>>),
+}
+impl<T> default::Default for SetOp<T> {
+    fn default() -> SetOp<T> {
+        ReplaceSK(HashSet::new())
+    }
+}
+
+pub static MULTI_SET_OP_ATTR: &'static str = "multi_set_op";
+pub static MULTI_SET_POS_ATTR: &'static str = "multi_set_pos";
 
 #[deriving(Encodable, Decodable)]
 pub enum MultiSetOp<T> {
     AddMSK,
     RemoveMSK,
     ReplaceMSK {
-        what: TagOrValueKey<T>,
-        once_: bool,
+        what: HashSet<Od<TagOrValueKey<T>>>,
+        count: Option<u64>,
     },
+}
+impl<T> default::Default for MultiSetOp<T> {
+    fn default() -> MultiSetOp<T> {
+        AddMSK
+    }
 }
 
 #[deriving(Encodable, Decodable, Eq, Clone, Hash, Ord, PartialEq)]
@@ -64,13 +134,13 @@ pub enum TagOrValueKey<T> {
 
 #[deriving(Encodable, Decodable, Eq, Clone, Hash, Ord, PartialEq)]
 pub enum MultiSetPosition<T> {
-    BeforeMSP(TagOrValueKey),
-    AfterMSP(TagOrValueKey),
+    BeforeMSP(TagOrValueKey<T>),
+    AfterMSP(TagOrValueKey<T>),
 }
-#[deriving(Encodable, Decodable)]
+#[deriving(Encodable, Decodable, Clone, Eq, PartialEq)]
 pub struct MultiSet<T> {
-    op: MultiSetOp<T>,
-    pos: Option<MultiSetPosition<T>>,
+    pub op: MultiSetOp<T>,
+    pub pos: Option<MultiSetPosition<T>>,
 }
 
 #[deriving(Encodable, Decodable)]
@@ -82,7 +152,7 @@ pub enum CrateSource {
     RepoCrateSource(url::Url),
     AddressCrateSource(Address),
 }
-#[deriving(Encodable, Decodable, Clone, Hash)]
+#[deriving(Encodable, Decodable)]
 pub struct ValueOrigin<T> {
     origin: Origin,
     level:  u64,
@@ -203,12 +273,18 @@ impl Overridable for ArgumentValues {
     }
 }
 
+pub static TOOL_ARG_KEY: &'static str = "tool_arg";
+pub static TOOL_KEY:     &'static str = "tool";
+pub static CRATE_KEY:    &'static str = "crate";
+pub static CFG_KEY:      &'static str = "cfg";
+pub static CODEGEN_KEY:  &'static str = "codegen";
+
 // The key of the override.
-#[deriving(Encodable, Decodable, Hash, Clone, Eq)]
+#[deriving(Encodable, Decodable, Hash, Clone, Eq, PartialEq)]
 pub enum Override {
     ArgOverride(ToolId, MultiSet<String>),
-    ToolOverride(ToolId, Path),
-    CrateOverride(CrateId),
+    ToolOverride(ToolId),
+    CrateOverride(Address, SetOp<String>),
     RustCfgOverride,
     CodegenOverride,
 }
@@ -220,7 +296,7 @@ pub struct Overrides {
     // the value is the override itself.
     args: HashMap<ToolId, ArgumentValues>,
     tools: HashMap<ToolId, Path>,
-    crates: HashMap<CrateId, Path>,
+    crates: HashMap<String, Path>,
 
     cfg: Vec<ValueOrigin<MultiSet<CfgValue>>>,
     

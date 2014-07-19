@@ -16,9 +16,10 @@
 // along with Rust Rocket. If not, see <http://www.gnu.org/licenses/>.
 
 use std::{path, clone};
-use std::default::Default;
 use std::collections::{EnumSet, TreeMap, HashMap};
 use std::collections::enum_set::CLike;
+use std::default::Default;
+use std::from_str::FromStr;
 use std::io::IoResult;
 use std::sync::Future;
 use syntax::crateid::CrateId;
@@ -85,6 +86,12 @@ impl Default for Address {
             segments: Vec::new(),
             suffix: Default::default(),
         }
+    }
+}
+impl ::FromStrWithOrigin for Address {
+    fn from_str_with_origin(s: &str, origin: Origin) -> Option<Address> {
+        // TODO
+        unimplemented!()
     }
 }
 /// Things that don't belong anywhere in an address except at the end.
