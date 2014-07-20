@@ -281,6 +281,14 @@ pub static CODEGEN_KEY:  &'static str = "codegen";
 
 // The key of the override.
 #[deriving(Encodable, Decodable, Hash, Clone, Eq, PartialEq)]
+pub enum Key {
+    ArgKey(ToolId),
+    ToolKey(ToolId),
+    CrateKey(Address),
+    CfgKey,
+    CodegenKey,
+}
+#[deriving(Encodable, Decodable, Hash, Clone, Eq, PartialEq)]
 pub enum Override {
     ArgOverride(ToolId, MultiSet<String>),
     ToolOverride(ToolId),
