@@ -33,6 +33,7 @@ use driver::{session, diagnostics};
 use BUILD_CRATE_FILENAME;
 use {SubtargetEsk, Build};
 
+pub mod bootstrap;
 pub mod build;
 pub mod load;
 pub mod rtio_wrapper;
