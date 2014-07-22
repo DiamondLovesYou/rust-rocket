@@ -16,21 +16,28 @@
 // along with Rust Rocket. If not, see <http://www.gnu.org/licenses/>.
 
 use std::path::Path;
-use address::Address;
+use std::collections::TreeSet;
 use std::comm::{Sender, Receiver};
 use std::dynamic_lib::DynamicLibrary;
+
 use syntax::crateid::CrateId;
 use syntax::ast;
-use collections::TreeSet;
+
 use rustc;
+
+use uuid;
+
+use address::Address;
 use override::{Origin, DefaultOrigin, SpanOrigin};
 use driver::{session, diagnostics};
-use super::BUILD_CRATE_FILENAME;
-use super::{SubtargetEsk, Build};
+use BUILD_CRATE_FILENAME;
+use {SubtargetEsk, Build};
 
 pub mod build;
 pub mod load;
 pub mod rtio_wrapper;
+
+pub type BuildCrateId = uuid::Uuid;
 
 static PROJECT_SOURCE_PATH: &'static str = "src";
 

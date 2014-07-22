@@ -31,6 +31,7 @@ use FromStrWithOrigin;
 
 use platform_dep::ToolId;
 use address::Address;
+use buildcrate::BuildCrateId;
 
 pub type Level = u64;
 
@@ -288,6 +289,24 @@ pub enum Key {
     CfgKey,
     CodegenKey,
 }
+
+#[deriving(Encodable, Decodable, Hash, Clone, Eq, PartialEq)]
+pub enum ValueType {
+    // A &'static str string.
+    StringType,
+
+    // TODO
+    FnType,
+}
+
+#[deriving(Encodable, Decodable, Hash, Clone, Eq, PartialEq)]
+pub struct Value {
+    pub buildcrate: BuildCrateId,
+    pub override: Override,
+    pub symbol: String,
+    pub value: Value,
+}
+
 #[deriving(Encodable, Decodable, Hash, Clone, Eq, PartialEq)]
 pub enum Override {
     ArgOverride(ToolId, MultiSet<String>),
