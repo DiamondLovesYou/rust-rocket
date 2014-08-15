@@ -1,6 +1,3 @@
-[submodule "src/bindgen"]
-	path = src/bindgen
-	url = https://github.com/crabtw/rust-bindgen.git
 [submodule "src/sqlite"]
 	path = src/sqlite
 	url = https://github.com/linuxfood/rustsqlite.git

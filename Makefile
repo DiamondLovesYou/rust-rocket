@@ -27,13 +27,10 @@ RUSTC := $(shell readlink -f $(RUSTC))
 
 RUSTFLAGS += -g -L /usr/lib/llvm-3.4/lib
 
-BINDGEN ?= $(shell readlink -f src/bindgen)
 SQLITE  ?= $(shell readlink -f src/sqlite)
 
 BUILD_OUT ?= $(shell readlink -f .)/build
 RUSTFLAGS += --out-dir=$(BUILD_OUT)
-
-
 
 rwildcard = $(foreach d,$(wildcard $1*),$(call rwildcard,$d/,$2) $(filter $(subst *,%,$2),$d))
 
@@ -60,7 +57,6 @@ DEPS += $$(BUILD_OUT)/$(2).stamp
 
 endef
 
-$(eval $(call DEP_RULES,BINDGEN,bindgen,lib.rs))
 $(eval $(call DEP_RULES,SQLITE,sqlite,src/sqlite3.rs))
 
 $(BUILD_OUT)/librocket.stamp: src/lib/lib.rs                 \
