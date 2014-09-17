@@ -22,6 +22,7 @@
 // lib.rs or a main.rs in all sub directories of src in the project root.
 
 use std::collections::{HashMap, HashSet};
+use std::default::Default;
 use std::from_str::FromStr;
 use std::fmt::Show;
 use std::gc::{Gc, GC};
@@ -56,9 +57,13 @@ use super::bootstrap::EXPANSION_YARD_NAME;
 use railroad::{Yard, Router};
 
 pub fn new_default() {
+    unimplemented!()
 }
 
-static TRAITS_VERSION: u64 = 1;
+pub type TraitsVersion = u64;
+pub type GetTraitsFn = fn() -> (TraitsVersion, &'static ());
+
+static TRAITS_VERSION: TraitsVersion = 1;
 static GET_BUILD_TRAITS_SYMBOL_NAME: &'static str = "rocket-get_build_traits";
 static NAME_PREFIX: &'static str = "rocket-";
 
@@ -67,17 +72,20 @@ static NAME_PREFIX: &'static str = "rocket-";
 // The fields are pub to allow us to construct it in the user's build crate.
 pub struct BuildCrateTraits {
     // For new built build crates, version will correspond to TRAITS_VERSION.
-    pub version: u64,
+    pub version: TraitsVersion,
 
     // the newest timestamp from all files used in the build crate (including
     // the build crate itself).
     // the paths to the build crate src files.
-    // For example, in Linux distribution build crates, this will be None.
+    // Linux distribution build crates will have a None here. This is because
+    // those build crates will pre-built, and will be selected based on the
+    // target. Thus Ubuntu distros can include build crates via packages and
+    // provide seemless cross distro compilation for Arch Linux, etc.
     pub src_paths: Option<(u64, &'static [&'static str])>,
 
     pub root:  &'static str,
 
-    pub child_build_crates: &'static [fn() -> &'static BuildCrateTraits],
+    pub child_build_crates: &'static [GetTraitsFn],
 }
 
 struct BuildTraitsInjecter<'a> {
@@ -131,7 +139,7 @@ impl<'a> BuildTraitsInjecter<'a> {
             root: root,
 
             sess: sess,
-            ext: ExtCtxt::new(&sess.parse_sess, cfg, ecfg),         
+            ext: ExtCtxt::new(&sess.parse_sess, cfg, ecfg),
         }
     }
     fn build_crate_traits_path(&self) -> ast::Path {
@@ -168,7 +176,8 @@ impl<'a> BuildTraitsInjecter<'a> {
         let (ts, ref paths) = self.src_paths;
         let src_paths_expr =
             ast::ExprTup(vec!(
-                self.ext.expr_lit(DUMMY_SP, ast::LitUint(ts, ast::TyU64)),
+                self.ext.expr_lit(DUMMY_SP,
+                                  ast::LitInt(ts, ast::UnsignedIntLit(ast::TyU64))),
                 self.ext.expr_vec_slice(DUMMY_SP,
                                         paths.iter()
                                         .map(|p| {
@@ -186,7 +195,9 @@ impl<'a> BuildTraitsInjecter<'a> {
         let fields = vec!(
             ast::Field {
                 ident: dummy_spanned(str_to_ident("version")),
-                expr:  self.ext.expr_lit(DUMMY_SP, ast::LitUint(TRAITS_VERSION, ast::TyU64)),
+                expr:  self.ext.expr_lit(DUMMY_SP,
+                                         ast::LitInt(TRAITS_VERSION,
+                                                     ast::UnsignedIntLit(ast::TyU64))),
                 span:  DUMMY_SP,
             },
             ast::Field {
@@ -286,7 +297,7 @@ impl<'a> Folder for BuildTraitsInjecter<'a> {
     }
 }
 
-pub fn build<T: SubtargetEsk>(target: &SubtargetEsk,
+pub fn build<T: SubtargetEsk>(target: &T,
                               krate_path: &Path,
                               out: &Path) {
     use rustc::driver::config::{build_configuration, basic_options,
@@ -322,6 +333,7 @@ pub fn build<T: SubtargetEsk>(target: &SubtargetEsk,
         out_directory: out.dir_path(),
         out_filestem: "dylib".to_string(),
         single_output_file: Some(out.clone()),
+        extra: "".to_string(),
     };
     let id = link::find_crate_name(Some(&rc_sess),
                                    krate.attrs.as_slice(),
@@ -329,7 +341,8 @@ pub fn build<T: SubtargetEsk>(target: &SubtargetEsk,
     let (krate, ast_map) =
         phase_2_configure_and_expand(&rc_sess,
                                      krate,
-                                     id.as_slice())
+                                     id.as_slice(),
+                                     None)
         .unwrap();
 
     check_version(&krate);
@@ -366,7 +379,7 @@ fn check_static_item(ty: &ast::Ty, expr: &ast::Expr) {
                     ..
                 } if segs.len() == 1 &&
                     segs.as_slice()[0].identifier == str_to_ident("str") => {
-                        
+
                     }
             }
         }
@@ -375,7 +388,7 @@ fn check_static_item(ty: &ast::Ty, expr: &ast::Expr) {
 
 // Information related to an override at the ast level. Note that no type info
 // is present.
-#[deriving(Clone, Encodable, Decodable, Hash, Eq, PartialEq)]
+#[deriving(Clone, Encodable, Decodable)]
 pub struct Override {
     // The node of the value. We use this later to resolve the fully mangled
     // name of the symbol.
@@ -446,7 +459,7 @@ fn rocket_meta<'a>(value: &'a ast::MetaItem) -> Option<&'a Vec<Gc<ast::MetaItem>
     }
 }
 fn filter_rocket_meta(attr: &ast::Attribute_) -> bool {
-    !attr.is_sugared_doc && rocket_meta(attr.value).is_none()
+    !attr.is_sugared_doc && rocket_meta(&*attr.value).is_none()
 }
 
 impl OverrideCollectorMap {
@@ -482,7 +495,7 @@ impl Folder for OverrideCollectorMap {
             .iter()
             .map(|attr| attr.node )
             .filter(|attr| !attr.is_sugared_doc )
-            .flat_map(|attr| rocket_meta(attr.value).iter() );
+            .flat_map(|attr| rocket_meta(&*attr.value).iter() );
 
         let mut attrs = AttributeMeta {
             addrs: None,
@@ -525,17 +538,13 @@ impl Folder for OverrideCollectorMap {
                         }
                         let value_origin = SpanOrigin(value.span);
                         attrs.level = match value.node {
-                            ast::LitInt(c, _) |
-                            ast::LitIntUnsuffixed(c) if c < 0 => {
+                            ast::LitInt(c, _) if (c as i64) < 0 => {
                                 diagnostics().err(value_origin,
                                                   "negative integers aren't allowed");
                                 continue;
                             }
-                            ast::LitInt(c, _) |
-                            ast::LitIntUnsuffixed(c) =>
+                            ast::LitInt(c, _)  =>
                                 Some(originate(c as u64, value_origin)),
-                            ast::LitUint(c, _) =>
-                                Some(originate(c, value_origin)),
                             _ => {
                                 diagnostics().err(value_origin,
                                                   "unexpected non-integer literal");
@@ -563,7 +572,7 @@ impl Folder for OverrideCollectorMap {
             }
         }
 
-        let override = Override::new(attrs, item);
+        let override = Override::new(attrs, &*item);
         self.overrides.push(override);
 
         // remove our attributes:
@@ -706,10 +715,12 @@ fn check_override(values: &[Gc<ast::MetaItem>],
         Some(Originated { node: Tool(tool), .. }) =>
             Some(override::ToolOverride(tool)),
         Some(Originated { node: Arg(tool), .. }) => {
-            let op = multi_set_op
+            let op: MultiSetOp<String> = match multi_set_op
                 .take()
-                .map(|Originated { node: node, .. }| node )
-                .unwrap_or_default();
+                .map(|Originated { node: node, .. }| node ) {
+                    Some(op) => op,
+                    None => Default::default(),
+                };
 
             let pos = multi_set_pos
                 .take()
@@ -873,20 +884,17 @@ fn check_multi_set_op(attr: &mut Option<OriginatedMultiSetOp>,
                             None => {}
                         }
                         count = match value {
-                            ast::LitInt(0, _) | ast::LitUint(0, _) | ast::LitIntUnsuffixed(0) => {
+                            ast::LitInt(0, _) => {
                                 diagnostics().err(SpanOrigin(value_span),
                                                   "unexpected zero count");
                                 return;
                             }
-                            ast::LitInt(c, _) | ast::LitIntUnsuffixed(c) if c < 0 => {
+                            ast::LitInt(c, _) if (c as i64) < 0 => {
                                 diagnostics().err(SpanOrigin(value_span),
                                                   "negative integers aren't allowed");
                                 return;
                             }
-                            ast::LitInt(c, _) | ast::LitIntUnsuffixed(c) =>
-                                Some(originate(c as u64,
-                                               SpanOrigin(value_span))),
-                            ast::LitUint(c, _) =>
+                            ast::LitInt(c, _) =>
                                Some(originate(c, SpanOrigin(value_span))),
                             _ => {
                                 diagnostics().err(SpanOrigin(value_span),
@@ -1032,7 +1040,7 @@ fn check_version(krate: &ast::Crate) {
     match meta.node {
         ast::MetaNameValue(_, ref v) => {
             match v.node {
-                ast::LitIntUnsuffixed(ver) if VERSION != ver as uint => {
+                ast::LitInt(ver, ast::UnsuffixedIntLit(ast::Plus)) if VERSION != ver as uint => {
                     diagnostics()
                         .err(SpanOrigin(v.span),
                              format!("expected `{}`", VERSION));
@@ -1045,7 +1053,7 @@ fn check_version(krate: &ast::Crate) {
                               "Backward compatibility will begin at 1.0");
                     diagnostics().fail();
                 }
-                ast::LitIntUnsuffixed(ver) if VERSION == ver as uint => (),
+                ast::LitInt(ver, ast::UnsuffixedIntLit(ast::Plus)) if VERSION == ver as uint => (),
                 ast::LitStr(..) => {
                     diagnostics()
                         .fatal(SpanOrigin(v.span),
@@ -1063,4 +1071,3 @@ fn check_version(krate: &ast::Crate) {
         _ => unreachable!(),
     }
 }
-

@@ -21,11 +21,15 @@ use std::collections::{HashMap, HashSet};
 use std::intrinsics::{type_id, TypeId};
 use std::sync::Future;
 use std::default;
+use std::default::Default;
 
 use time;
 use rustc;
+use sqlite;
 
 use address;
+use driver::database::{EnumVariantToKey, EnumVariantKey,
+                       ToBindArg};
 use driver::session;
 use override;
 use override::Origin;
@@ -35,8 +39,13 @@ use stats;
 // types larger than 2 MB are deemed freight.
 static OCCUPANCY_CAPACITY: u64 = 1024 * 1024 * 2;
 
+#[deriving(Encodable, Decodable, Clone, Hash, Eq, PartialEq, Ord, PartialOrd)]
+pub struct RouterId(pub u64);
+
 #[deriving(Encodable, Decodable)]
 pub struct Router {
+    id: RouterId,
+    name: String,
     yards: Vec<Yard>,
 }
 impl Router {
@@ -70,7 +79,7 @@ impl Router {
             //let start = time::precise_time_ns();
             yard.route(self, conductor, train);
             //let end = time::precise_time_ns();
-            
+
             // if a piece of cargo is determined to be dissimilar to its previous value,
             // bump the revisions of said cargo:
         }
@@ -101,7 +110,7 @@ pub enum Classification {
 
     // read only.
     ScannedClass,
-    
+
     // read/write.
     RefineryClass,
 
@@ -186,7 +195,7 @@ impl HumpCache {
         self.by_cargo_key.insert_or_update_with(id, class, |_, c| {
                 c = class;
             });
-        
+
         let set = if class.is_read() {
             self.reads
         } else if class.is_write() {
@@ -209,40 +218,44 @@ impl HumpCache {
 }
 //pub type HumpPush = |CargoKey, Classification|;
 pub type Hump = fn(push: |CargoKey, Classification|);
-pub type YardId = uint;
+pub type YardId = u32;
+
+static DUMMY_YARD_ID: u32 = 0;
 
 #[deriving(Encodable, Decodable)]
 pub struct Yard {
     id: YardId,
     origin: Origin,
-    name: String,
+    pub name: String,
     hump: Hump,
     hump_cache: HumpCache,
     industry: Industry,
 }
 pub type Industry = fn(&session::Router, &mut Train) -> Diversion;
 impl Yard {
-    pub fn new(id: YardId,
+    pub fn new(name: String,
                origin: Origin,
                industry: Industry,
                hump: Hump) -> Yard {
         Yard {
+            id: DUMMY_YARD_ID,
             origin: origin,
-            id: id,
+            name: name,
             hump: hump,
+            hump_cache: Default::default(),
             industry: industry,
             hump_cache: None,
         }
     }
-    fn route(&self, sess: &session::Session, router: &Router, train: &mut Train) {
-        
+    fn route(&self, router: &Router, train: &mut Train) {
+
     }
 }
 
-#[deriving(Eq, Clone, Encodable, Decodable, Hash)]
+#[deriving(Eq, PartialEq, Ord, PartialOrd, Clone, Encodable, Decodable, Hash)]
 pub enum CargoKey {
     TypeIdCargoKey(TypeId),
-    OverrideCargoKey(override::Override),
+    OverrideCargoKey(override::Key),
 
     // build steps/what-have-you
     DepCargoKey(address::Address),
@@ -256,13 +269,72 @@ pub enum CargoKey {
     // the Router's main input.
     MainInputCargoKey,
 }
+impl EnumVariantToKey<EnumVariantKey> for CargoKey {
+    fn enum_variant_key(&self) -> Option<EnumVariantKey> {
+        static TYPEID_KEY: EnumVariantKey = 0;
+        static OVERRIDE_KEY: EnumVariantKey = 1;
+        static DEP_KEY: EnumVariantKey = 2;
+        static FILE_KEY: EnumVariantKey = 3;
+        static FREIGHT_KEY: EnumVariantKey = 4;
 
+        match self {
+            &MainInputCargoKey => None,
+            &TypeIdCargoKey(_) => Some(TYPEID_KEY),
+            &OverrideCargoKey(_) => Some(OVERRIDE_KEY),
+            &DepCargoKey(_) => Some(DEP_KEY),
+            &FileCargoKey(_) => Some(FILE_KEY),
+            &FreightCargoKey(_) => Some(FREIGHT_KEY),
+        }
+    }
+}
 enum Car {
     DecoupledCar(Origin),
-    CoupledCar(Origin, Box<Any>),
-    UnpackingCar(Future<Box<Any>>),
-    UnpackedCar(Box<Any>),
+    CoupledCar(Origin, Box<Any + 'static>),
+    UnpackingCar(Future<Box<Any + 'static>>),
+    UnpackedCar(Box<Any + 'static>),
 }
+
+#[deriving(Encodable, Decodable, Hash, Clone, Eq, PartialEq, Ord, PartialOrd)]
+pub struct TrainId(pub u64);
+
+impl ToBindArg for TrainId {
+    fn to_bind_arg(&self) -> sqlite::BindArg {
+        self.inner_id().to_bind_arg()
+    }
+}
+impl<'a> ToBindArg for &'a TrainId {
+    fn to_bind_arg(&self) -> sqlite::BindArg {
+        self.inner_id().to_bind_arg()
+    }
+}
+
+impl TrainId {
+    fn inner_id(&self) -> u64 {
+        let &TrainId(id) = self;
+        id
+    }
+
+    pub fn filename(&self) -> Path {
+        static QUERY: &'static str =
+            "SELECT input FROM [trains] WHERE id == ?1";
+    }
+    pub fn name(&self) -> String {
+        static QUERY: &'static str =
+            "SELECT name FROM [trains] WHERE id == ?1";
+        let mut names = database()
+            .select(QUERY,
+                    [self.inner_id().to_bind_arg()],
+                    |c| {
+                        c.get_text()
+                            .map(|slice| slice.to_string() )
+                            .unwrap()
+                    });
+        assert_eq!(names.len(), 1);
+        names.swap_remove(0)
+            .unwrap()
+    }
+}
+
 #[deriving(Encodable, Decodable, Hash)]
 pub struct Train {
     cars: HashMap<CargoKey, Car>,
@@ -280,14 +352,19 @@ impl Train {
         train.couple(input);
         train
     }
+
+    pub fn sess<'a>(&'a self) -> &'a rustc::driver::session::Session {
+        &self.rustc_sess
+    }
     pub fn by_type_id<'train, T>(&'train self) -> CarRef<'train, T> {
         self.hump.ensure_class()
     }
-    pub fn by_override<'train, T>(&'train self) -> CarRef<'train, T> {
-        
+    pub fn by_override<'train, T>(&'train self, override: override::Key, _: Option<T>) -> CarRef<'train, T> {
+
     }
+
     /// only available to the first yard.
-    pub fn main_input<'a>(&'a self) -> &'a Option<InputCargo> {
+    pub fn main_input<'a>(&'a self) -> &'a Option<Path> {
         self.hump.merge_read(MainInputCargoKey);
         self.main_input
     }
@@ -299,7 +376,7 @@ impl Train {
     pub fn couple<T: Any>(&mut self, car: T) {
         let key = TypeIdCargoKey(type_id::<T>());
         self.cars.insert_or_update_with(key, box car as Box<Any>, |_, old| {
-                
+
             });
     }
     pub fn clone_car<T: Any>(&self) -> T {
@@ -307,6 +384,12 @@ impl Train {
                                                     read access to this car")
     }
 }
+/*impl rustc::driver::driver::SessionCarrier for Train {
+    fn sess<'a>(&'a self) -> &'a rustc::driver::session::Session {
+        &self.rustc_sess
+    }
+}*/
+
 type BorrowFlag = uint;
 static UNUSED: BorrowFlag = 0;
 static WRITING: BorrowFlag = -1;
@@ -316,12 +399,9 @@ pub struct CarRef<'train, TCargo> {
     access: Classification,
     flags: uint,
 }
-pub struct Ref<'train, 'car, TCargo> {
-    parent: &'car CarRef<'train, TCargo>,
-}
-impl<'train, 'car, TCargo> Deref<TCargo> for Ref<'train, 'car, TCargo> {
+impl<'train, TCargo> Deref<TCargo> for CarRef<'train, TCargo> {
     fn deref<'a>(&'a self) -> &'a TCargo {
-        &self.parent.cargo
+        assert!(self.access.is_read());
+        &self.cargo
     }
 }
-                                       

@@ -15,12 +15,15 @@
 // You should have received a copy of the GNU Lesser General Public License
 // along with Rust Rocket. If not, see <http://www.gnu.org/licenses/>.
 
-use std::path::Path;
 use std::collections::TreeSet;
 use std::comm::{Sender, Receiver};
 use std::dynamic_lib::DynamicLibrary;
+use std::hash;
+use std::hash::sip::SipState;
+use std::intrinsics::TypeId;
+use std::mem::transmute;
+use std::path::Path;
 
-use syntax::crateid::CrateId;
 use syntax::ast;
 
 use rustc;
@@ -30,64 +33,145 @@ use uuid;
 use address::Address;
 use override::{Origin, DefaultOrigin, SpanOrigin};
 use driver::{session, diagnostics};
+use driver::diagnostics::Driver;
 use BUILD_CRATE_FILENAME;
-use {SubtargetEsk, Build};
+use {SubtargetEsk, Build, CrateId, TargetId, SubtargetId};
 
 pub mod bootstrap;
 pub mod build;
+pub mod dylib;
 pub mod load;
 pub mod rtio_wrapper;
 
-pub type BuildCrateId = uuid::Uuid;
-
 static PROJECT_SOURCE_PATH: &'static str = "src";
 
-enum Message {
-    
-}
-struct Session {
-    recv: Receiver<Message>,
-    
-    source_crates: Vec<Crate>,
-}
-impl Session {
-}
-pub struct SessionIf {
-    send: Sender<Message>,
-}
-impl SessionIf {
-    
+
+#[deriving(Clone, Eq, PartialEq, Ord, PartialOrd)]
+pub struct SymbolId(pub BuildCrateId, pub SymbolIndex);
+pub type SymbolIndex = u64;
+
+#[deriving(Clone, Eq, PartialEq, Ord, PartialOrd)]
+pub struct TypeIdHash(pub u64);
+
+impl<S: hash::Writer> hash::Hash<S> for TypeIdHash {
+    fn hash(&self, state: &mut S) {
+        use std::hash::Writer;
+        use std::mem::transmute_copy;
+        let &TypeIdHash(ref h) = self;
+        let h = h.to_le();
+        let h: [u8, ..8] = unsafe { transmute_copy(&h) };
+        state.write(h);
+    }
 }
 
-// Crate represents Things that must be known throughout a run about a specific crate.
-// path && path_ts are stored in the DB, everything else is discovered 
-pub struct Crate {
-    // this path must be relative to the source dir
-    path: Path,
-    path_ts: u64,
-
-    id: CrateId,
-    deps: Vec<CrateId>,
+#[deriving(Clone, Eq, PartialEq, Hash)]
+pub enum SymbolKind {
+    StaticStrKind,
+    FnSymbolKind(TypeIdHash),
 }
+impl Ord for SymbolKind {
+    fn cmp(&self, rhs: &SymbolKind) -> Ordering {
+        match (self, rhs) {
+            (&StaticStrKind, &StaticStrKind) => Equal,
+            (&StaticStrKind, _) => Less,
+            (_, &StaticStrKind) => Greater,
+
+            (&FnSymbolKind(ref ltid),
+             &FnSymbolKind(ref rtid))
+                if ltid == rtid => Equal,
+            (&FnSymbolKind(ref ltid),
+             &FnSymbolKind(ref rtid))
+                if ltid < rtid => Less,
+            (&FnSymbolKind(ref ltid),
+             &FnSymbolKind(ref rtid))
+                if ltid > rtid => Greater,
+        }
+    }
+}
+impl PartialOrd for SymbolKind {
+    fn partial_cmp(&self, rhs: &SymbolKind) -> Option<Ordering> {
+        Some(self.cmp(rhs))
+    }
+}
+
+#[deriving(Clone)]
+pub struct Symbol {
+    id: SymbolId,
+    ptr: *const (),
+    kind: SymbolKind,
+}
+impl Symbol {
+    pub fn get_str_opt<'a>(&'a self) -> Option<&'a str> {
+        match self.kind {
+            StaticStrKind => unsafe {
+                Some(transmute(self.ptr))
+            },
+            _ => None,
+        }
+    }
+    pub fn get_fn_opt<R: 'static>(&self) -> Option<R> {
+        match self.kind {
+            FnSymbolKind(tid) if tid == TypeIdHash(TypeId::of::<R>().hash()) => unsafe {
+                Some(transmute(self.ptr))
+            },
+            _ => None,
+        }
+    }
+}
+impl Eq for Symbol {}
+impl PartialEq for Symbol {
+    fn eq(&self, rhs: &Symbol) -> bool {
+        self.id.eq(&rhs.id)
+    }
+}
+impl Ord for Symbol {
+    fn cmp(&self, rhs: &Symbol) -> Ordering {
+        self.id.cmp(&rhs.id)
+    }
+}
+impl PartialOrd for Symbol {
+    fn partial_cmp(&self, rhs: &Symbol) -> Option<Ordering> {
+        self.id.partial_cmp(&rhs.id)
+    }
+}
+
+#[deriving(Encodable, Decodable, Hash, Clone, Eq, PartialEq, Ord, PartialOrd)]
+pub struct BuildCrateId(pub u64);
+
+/// This MUST match the bootstrapper's id in master.db.
+static BOOTSTRAP_BUILD_CRATE_ID: BuildCrateId = BuildCrateId(1);
+
+impl BuildCrateId {
+    pub fn bootstrapper() -> BuildCrateId {
+        BOOTSTRAP_BUILD_CRATE_ID.clone()
+    }
+}
+
 pub struct BuildCrate {
+    id: BuildCrateId,
     path: Path,
+
+    target: Option<TargetId>,
+    subtarget: Option<SubtargetId>,
+
     dylib: Option<DynamicLibrary>,
 }
 impl BuildCrate {
-    pub fn configure<TTarget: SubtargetEsk>(build: &Build,
-                                            target: &TTarget) -> BuildCrate {
-
-        let build_crate_path = build.src_path.join(BUILD_CRATE_FILENAME);
-        if build_crate_path.exists() {
-            // build the build crate as a dylib
-            // TODO: overrides
-            // TODO: build crate injections (for example, for use in Rust proper
-            // in the bootstrapping binary).
-
-        } else {
-            diagnostics().fatal(DefaultOrigin,
-                                "for the time begin, Rocket requires a build crate TODO");
-        }
+}
+impl Eq for BuildCrate {}
+impl PartialEq for BuildCrate {
+    fn eq(&self, rhs: &BuildCrate) -> bool {
+        self.id.eq(&rhs.id)
+    }
+}
+impl Ord for BuildCrate {
+    fn cmp(&self, rhs: &BuildCrate) -> Ordering {
+        self.id.cmp(&rhs.id)
+    }
+}
+impl PartialOrd for BuildCrate {
+    fn partial_cmp(&self, rhs: &BuildCrate) -> Option<Ordering> {
+        Some(self.cmp(rhs))
     }
 }
 
@@ -123,4 +207,3 @@ impl BuildCrate {
         }).ok()
     }).collect())
 }*/
-

@@ -20,6 +20,7 @@ use std::collections::HashMap;
 use std::cell::RefCell;
 
 use driver::diagnostics;
+use driver::diagnostics::Driver;
 use override::Origin;
 
 #[deriving(Encodable, Decodable)]

@@ -25,7 +25,7 @@ endif
 # if the user set RUSTC, make sure its absolute:
 RUSTC := $(shell readlink -f $(RUSTC))
 
-RUSTFLAGS += -g -L /usr/lib/llvm-3.4/lib
+RUSTFLAGS += -g
 
 SQLITE  ?= $(shell readlink -f src/sqlite)
 

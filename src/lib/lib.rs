@@ -26,7 +26,6 @@
 
 extern crate syntax;
 extern crate rustc;
-extern crate std;
 extern crate glob;
 extern crate term;
 extern crate arena;
@@ -34,8 +33,7 @@ extern crate serialize;
 #[phase(plugin, link)]
 extern crate log;
 extern crate green;
-extern crate sqlite = "sqlite3";
-extern crate bindgen;
+extern crate "sqlite3" as sqlite;
 extern crate collections;
 extern crate rustuv;
 extern crate sync;
@@ -49,6 +47,8 @@ use syntax::ast::{CrateConfig, Name};
 use syntax::{codemap, crateid};
 use syntax::diagnostic::{Emitter, Handler, Level, SpanHandler};
 use std::fmt;
+use std::from_str::FromStr;
+use std::hash::sip::{SipHasher, SipState};
 use std::path::Path;
 use std::str::MaybeOwned;
 use std::rc::{Rc, Weak};
@@ -56,6 +56,8 @@ use rustc::driver::config::CrateType;
 
 pub use rustc::driver::driver::host_triple;
 
+use driver::diagnostics;
+use driver::database::ToBindArg;
 use override::Origin;
 
 pub static BUILD_CRATE_FILENAME: &'static str = "build.rs";
@@ -64,12 +66,13 @@ pub static DB_FILENAME: &'static str = "master.db";
 pub static DB_EXT: &'static str = "db";
 pub static IN_TREE_BUILD_SUBPATH: &'static str = "build";
 pub static TARGETS_PATH: &'static str = "target";
+static BUILD_CRATE_DEST_PATH: &'static str = "build_crates";
 
-static BUILD_SUBTARGET_ID: SubtargetId = 0;
+static BUILD_SUBTARGET_ID: SubtargetId = SubtargetId(0);
 static BUILD_SUBTARGET_NAME: &'static str = "build";
-static HOST_SUBTARGET_ID: SubtargetId = 1;
+static HOST_SUBTARGET_ID: SubtargetId = SubtargetId(1);
 static HOST_SUBTARGET_NAME: &'static str = "host";
-static TARGET_SUBTARGET_ID: SubtargetId = 2;
+static TARGET_SUBTARGET_ID: SubtargetId = SubtargetId(2);
 static TARGET_SUBTARGET_NAME: &'static str = "target";
 
 macro_rules! build_session(
@@ -108,7 +111,7 @@ macro_rules! build_session(
             fn new_task(diag: driver::DiagIf,
                         rustb: Path) -> SessionIf {
                 tasks::spawn(proc() {
-                    
+
                 })
             }
         }
@@ -184,17 +187,26 @@ fn create_initial_mstr_db(rustb_path: &Path) -> sqlite::Database {
             .expect("couldn't create sqlite db!")
 }
 
+#[deriving(Encodable, Decodable, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
+pub struct BuildId(pub u64);
+
+impl ToBindArg for BuildId {
+    fn to_bind_arg(&self) -> sqlite::BindArg {
+        let &BuildId(ref inner) = self;
+        inner.to_bind_arg()
+    }
+}
+
 #[deriving(Encodable, Decodable)]
 pub struct Build {
-    targets: Vec<Target>,
+    id: BuildId,
 
     src_path: Path,
     build_path: Path,
-    
-    build_crate: Box<buildcrate::Crate>,
-    db: sqlite::Database,
-    
-    externs: Option<Vec<Extern>>,
+
+    stable_hashing_seeds: (u64, u64),
+
+    remote_url: Option<url::Url>,
 }
 
 impl Build {
@@ -260,7 +272,12 @@ impl Build {
 
     pub fn load(path: &Path) -> Option<Build> {
         let db_path = path.join_many([ROCKET_PATH, DB_FILENAME]);
-        
+
+    }
+
+    pub fn db_path(&self) -> Path {
+        self.build_path.join_many([ROCKET_PATH,
+                                   DB_FILENAME])
     }
 
     pub fn create_target(&mut self,
@@ -275,7 +292,9 @@ impl Build {
                  target: Vec<String>) {
         for t in self.targets
             .mut_iter()
-            .filter(|t| target.is_none() || t.name == target.unwrap() ) {
+            .filter(|t| {
+                target.is_none() || target.contains(t.name)
+            }) {
             t.build(self);
         }
     }
@@ -289,39 +308,52 @@ impl Build {
         assert!(dir.is_relative());
         let dir = self.build_path.join(dir);
         if dir.exists() {
-            match lstat(dir) {
+            match lstat(&dir) {
                 Ok(FileStat { perm: perm, .. }) if perm & io::UserRWX == io::UserRWX => {},
                 Ok(FileStat { perm: perm, .. }) => {
-                    match chmod(dir, perm | io::UserRWX) {
+                    match chmod(&dir, perm | io::UserRWX) {
                         Ok(()) => {},
                         Err(e) => {
-                            self.fatal(format!("couldn't chmod directory {}: {}",
-                                               dir.display(),
-                                               e))
+                            diagnostics().fatal(format!("couldn't chmod \
+                                                         directory {}: {}",
+                                                        dir.display(),
+                                                        e));
                         }
                     }
                 }
                 Err(e) => {
-                    self.fatal(format!("couldn't lstat directory {}: {}",
-                                       dir.display(),
-                                       e))
+                    diagnostics().fatal(format!("couldn't lstat \
+                                                 directory {}: {}",
+                                                dir.display(),
+                                                e));
                 }
             }
         } else {
-            match mkdir_recursive(dir, io::UserRWX) {
+            match mkdir_recursive(&dir, io::UserRWX) {
                 Ok(()) => {},
                 Err(e) => {
-                    self.fatal(format!("couldn't create directory {}: {}",
-                                       dir.display(),
-                                       e));
+                    diagnostics().fatal(format!("couldn't create directory \
+                                                 {}: {}",
+                                                dir.display(),
+                                                e));
                 }
             }
         }
+    }
+
+    pub fn build_crate_dest_path(&self) -> Path {
+        self.build_path.join(BUILD_CRATE_DEST_PATH)
+    }
+    pub fn stable_hasher(&self) -> SipState {
+        let (k0, k1) = self.stable_hashing_seeds;
+        SipState::new_with_keys(k0, k1)
     }
 }
 pub struct BuildConfigure {
     src_path: Path,
     build_path: Path,
+
+    stable_hash_seeds: Option<(u64, u64)>,
 
     // Use Some with an empty Vec to configure no targets.
     targets: Option<Vec<TargetConfigure>>,
@@ -335,12 +367,27 @@ pub struct TargetConfigure {
 }
 impl TargetConfigure {
     pub fn configure(&self, build: &Build) -> Target {
-        
+
     }
 }
 
-pub type TargetId = uint;
-pub type SubtargetId = uint;
+#[deriving(Encodable, Decodable, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
+pub struct TargetId(pub u64);
+#[deriving(Encodable, Decodable, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
+pub struct SubtargetId(pub u64);
+
+impl ToBindArg for TargetId {
+    fn to_bind_arg(&self) -> sqlite::BindArg {
+        let &TargetId(ref inner) = self;
+        inner.to_bind_arg()
+    }
+}
+impl ToBindArg for SubtargetId {
+    fn to_bind_arg(&self) -> sqlite::BindArg {
+        let &SubtargetId(ref inner) = self;
+        inner.to_bind_arg()
+    }
+}
 
 // Note Target is also a subtarget; specifically, it's the target's target
 pub struct Target {
@@ -358,9 +405,9 @@ impl Target {
     pub fn build(&mut self,
                  build: &Build) {
         if self.crates.len() == 0 {
-            
+
         } else {
-            
+
         }
     }
 }
@@ -376,20 +423,14 @@ impl Subtarget {
 
 pub trait SubtargetEsk {
     fn address_prefix(&self) -> address::Prefix;
-
     fn triple<'a>(&'a self) -> &'a MachineTriple;
+    fn build_crate_dest<'a>(&'a self) -> &'a Path;
 
     fn build_default_config(&self) -> CrateConfig {
-        
+
     }
 }
-
-pub struct Extern {
-    src_path: Path,
-    buildcrate: buildcrate::Crate,
-}
-
-
+#[deriving(Encodable, Decodable, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub struct MachineTriple(String);
 impl fmt::Show for MachineTriple {
     fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
@@ -405,20 +446,34 @@ pub enum PreferenceLevel {
     SubtargetPrefLevel,
 }
 pub enum LogDestination {
-    
+
 }
 
 pub struct Preferences {
     level: PreferenceLevel,
-    
+
     logging: Option<bool>,
     verbose: Option<bool>,
-    
+
     trans_stats: Option<bool>,
-   
+
 }
 
-// Takes an Origin in addition for diagnostics.
+/// Takes an Origin in addition for diagnostics.
 pub trait FromStrWithOrigin {
     fn from_str_with_origin(s: &str, origin: Origin) -> Option<Self>;
+}
+
+#[deriving(Eq, PartialEq, Ord, PartialOrd, Hash, Clone, Encodable, Decodable)]
+pub struct CrateId(String);
+impl CrateId {
+    pub fn crate_name<'a>(&'a self) -> &'a str {
+        let &CrateId(ref inner) = self;
+        inner.as_slice()
+    }
+}
+impl FromStr for CrateId {
+    fn from_str(s: &str) -> Option<CrateId> {
+        Some(CrateId(s.to_string()))
+    }
 }

@@ -27,13 +27,15 @@ use std::hash::Hash;
 use std::collections::{HashMap, RingBuf};
 use std::sync::Future;
 use serialize::{Encodable, Decodable};
-use serialize::ebml::reader::Decoder;
-use serialize::ebml::writer::Encoder;
-use serialize::{ebml, json};
+use serialize::json;
 
 use address::Address;
+use driver;
+use driver::WorkcacheIf;
 use override::Overrides;
 use TargetId;
+
+pub use serialize::json::{Encoder, Decoder};
 
 // singleton task POV
 enum Message {
@@ -41,10 +43,10 @@ enum Message {
     // if Some(..), send back the post de-reference ref count.
     // used during shutdown to assert there are no more refs.
     DropIfRefMsg(Option<Sender<u64>>),
-    
+
     // sends back true if the work was identical to existing work.
     CacheMsg(Sender<CachingResult>, Receiver<Vec<u8>>, Key),
-    
+
     HelperFinishedCachingMsg(HelperCachingResult),
 }
 
@@ -54,14 +56,13 @@ struct HelperCachingResult {
     result: IoResult<(KeyId, Entry)>,
     ret: Sender<CachingResult>,
 }
-pub type EbmlEncoder<'a> = Encoder<'a, io::BufferedWriter<io::ChanWriter>>;
-pub type EbmlDecoder<'a> = Decoder<'a>;
-pub trait CachableWork<'a>: Encodable<EbmlEncoder<'a>, IoError> + Decodable<Decoder<'a>, IoError> + Hash {}
+
+pub trait CachableWork<'a>: Encodable<Encoder<'a>, IoError> + Decodable<Decoder, IoError> {}
 
 pub type Key = Address;
 
 /// a more light-weight key into the cache.
-#[deriving(Encodable, Decodable, Hash, Clone, Eq)]
+#[deriving(Encodable, Decodable, Hash, Clone, Eq, PartialEq)]
 pub struct KeyId(u64);
 impl KeyId {
     fn unwrap(&self) -> u64 {
@@ -70,28 +71,18 @@ impl KeyId {
     }
 }
 
-#[deriving(Encodable, Decodable, Clone, Eq)]
+#[deriving(Clone)]
 struct Entry {
+    id: u64,
     Key:  Key,
-    tid:  TargetId,
-    path: Path,
     hash: u64,
+    path: KeyId,
 }
-static CACHE_ARTIFACT_SUBPATH: &'static str = ".cache";
-// Make sure 
-static DB_VERSION: u64 = 0;
-#[deriving(Encodable, Decodable)]
-struct Db {
-    // we need consistent hashes:
-    hash_keys: (u64, u64),
-    cache: HashMap<KeyId, Entry>,
-    
-    cache_path: Path,
-}
+
+static CACHE_ARTIFACT_SUBPATH: &'static str = "cache";
 // houses the runtime needs of a workcache task. It is not saved.
 struct Session {
-    db: Db,
-    db_file: File,
+    cache_path: Path,
     hasher: SipState,
     own: SessionIf,
     ref_count: u64,
@@ -101,50 +92,22 @@ struct Session {
     work:    RingBuf<HelperWork>,
 }
 impl Session {
-    fn new((port, chan): (Receiver<Message>, Sender<Message>),
-           wc_db_path: &Path, artifact_path: &Path) -> IoResult<SessionIf> {
-        let mut file = try!(File::open_mode(wc_db_path, Open, ReadWrite));
-
-        fn load_db_or_default(file: &mut File, artifact_path: &Path) -> Db {
-            fn init_default(artifact_path: &Path) -> Db {
-                Db {
-                    hash_keys: (rand::random(), rand::random()),
-                    cache: HashMap::new(),
-                    keys: HashMap::new(),
-                    artifact_path: artifact_path.join(CACHE_ARTIFACT_SUBPATH),
-                }
-            }
-
-            let json = match json::from_reader(&mut file as &mut Reader) {
-                Ok(j) => j.unwrap(),
-                e => {
-                    return init_default(artifact_path);
-                }
-            };
-            let mut decoder = json::Decoder::new(json);
-            let version = decoder.read_u64();
-            if version != DB_VERSION {
-                init_default(artifact_path)
-            } else {
-                Decodable::decode(&mut decoder)
-            }
-        }
+    fn new(sv: driver::SupervisorIf) -> SessionIf {
+        let (s, r) = channel();
         let own = SessionIf {
-            chan: chan,
+            chan: s,
         };
         spawn(proc() {
-                let db = load_db_or_default(&mut file, artifact_path);
-                let (k0, k1) = db.hash_keys.clone();
+                sv.bootstrap_task();
                 let mut sess = Session {
-                    hasher: SipState::new_with_keys(k0, k1),
-                    db: db,
-                    db_file: file,
-                    own: own.clone(),
-                    ref_count: 0u,
+                    cache_path: sv.get_build_path().join(CACHE_ARTIFACT_SUBPATH),
+                    hasher: sv.stable_hasher(),
+                    own: own.fake_clone(),
+                    ref_count: 1u64,
                     helpers: RingBuf::new(),
                     work:    RingBuf::new(),
                 };
-                sess.task(port)
+                sess.task(r)
             });
         own
     }
@@ -152,7 +115,7 @@ impl Session {
     fn send_helper_work(&self,
                         hif:  &HelperIf,
                         work: HelperWork) {
-        hif.send(HelperWork {
+        hif.chan.send(HelperWork {
                 own: Some(hif.clone()),
                 .. work
             });
@@ -162,64 +125,53 @@ impl Session {
         k.hash(&mut self.hasher);
         self.hasher.reset();
     }
-    fn record_hash_key(&mut self,
-                       k: &Key) -> KeyId {
-        let kid = self.hash_key(k);
-        self.db.keys.mangle(kid,
-                            (),
-                            |_, _| k.clone(),
-                            |_, _, _| ());
-        kid
-    }
-
 
     fn hdl_cache_msg(&mut self,
                      client_ret: Sender<CachingResult>,
                      incoming: Receiver<Vec<u8>>,
                      key: Key) {
-        let kid = self.record_hash_key(key);
+        let kid = self.record_hash_key(&key);
         let work = HelperWork {
             key: kid,
-            ret: self.own.clone(),
+            ret: self.own.chan.clone(),
             client_ret: client_ret,
-            path: self.db.cache_path.join(Path::new(format!("{:}", kid.unwrap()))),
+            path: self.cache_path.join(Path::new(format!("{:}", kid.unwrap()))),
             prev_entry: None,
             recv: incoming,
-            ret: client_ret,
             own: None,
         };
-        match self.helpers.pop_front() {
+        match self.helpers.pop() {
             Some(hif) => {
-                self.send_helper_work(hif, work);
+                self.send_helper_work(&hif, work);
             }
             None => {
-                self.work.push_back(work);
+                self.work.push(work);
             }
         }
     }
     fn hdl_helper_finished_msg(&mut self,
                                result: HelperCachingResult) {
-        let result = match self.work.pop_front() {
+        let result = match self.work.pop() {
             None => {
-                self.helpers.push_back(result.hif);
+                self.helpers.push(result.hif);
                 result.result
             },
             Some(work) => {
                 // skip adding to the helpers queue only to remove
                 // it sometime later in this function.
-                self.send_helper_work(result.hif, work);
+                self.send_helper_work(&result.hif, work);
                 result.result
             }
         };
 
         // FIXME(rdiamond): report errors.
         let (kid, entry) = match result {
-            Err(e) => fail!(e.to_str()),
+            Err(e) => fail!("{}", e.to_string()),
             Ok(ok) => ok,
         };
 
         // check to see if any body else has finished first.
-        
+
     }
 
     fn process_messages<T: Iterator<Message>>(&mut self, mut msgs: T) {
@@ -228,10 +180,10 @@ impl Session {
                 DropIfRefMsg(None) => { self.ref_count -= 1; },
                 DropIfRefMsg(Some(ret)) => {
                     self.ref_count -= 1;
-                    ret.try_send(self.ref_count);
+                    ret.send_opt(self.ref_count);
                 }
                 AddIfRefMsg => { self.ref_count += 1; },
-                
+
                 CacheMsg(c, p, k) => self.hdl_cache_msg(c, p, k),
                 HelperFinishedCachingMsg(result) => {
                     self.hdl_helper_finished_msg(result)
@@ -249,11 +201,11 @@ impl Session {
         static HELPER_COUNT: uint = std::rt::default_sched_threads();
 
         for _ in iter::range(0, HELPER_COUNT) {
-            let hif = HelperSession::new(channel(), self.db.hash_keys.clone());
-            self.helpers.push_back(hif);
+            let hif = HelperSession::new(channel(), self.hasher.clone());
+            self.helpers.push(hif);
         }
 
-        self.process_msgs(port.iter());
+        self.process_messages(port.iter());
     }
 }
 struct HelperSession {
@@ -262,17 +214,17 @@ struct HelperSession {
 }
 impl HelperSession {
     fn task(mut self) {
-        for work in self.port.iter() {
+        for mut work in self.port.iter() {
             work.do_work(&mut self);
         }
     }
 
-    fn new((port, chan): (Receiver<HelperWork>, Sender<HelperWork>),
-           (key0, key1): (u64, u64)) -> HelperIf {
+    fn new((chan, port): (Sender<HelperWork>, Receiver<HelperWork>),
+           hasher: SipState) -> HelperIf {
         spawn(proc() {
                 let mut sess = HelperSession {
                     port: port,
-                    hasher: SipState::new_with_keys(key0, key1),
+                    hasher: hasher,
                 };
                 sess.task();
             });
@@ -296,68 +248,74 @@ struct HelperWork {
 }
 impl HelperWork {
     // Predicate: output file is closed
-    fn ret(&self, sess: &mut HelperSession, err: Option<IoError>) {
+    fn ret(&mut self, sess: &mut HelperSession, err: Option<IoError>) {
         match err {
             Some(e) => {
-                self.client_ret.try_send(Err(e.clone()));
-                self.ret.try_send(HelperFinishedCachingMsg(Err(e)));
+                self.client_ret.send_opt(Err(e.clone()));
+                let res = HelperCachingResult {
+                    result: Err(e),
+                    hif: self.own.take().unwrap(),
+                    sender: self.client_ret.clone(),
+                };
+                self.ret.send_opt(HelperFinishedCachingMsg(res));
             }
             None => {
-                let prev = self.prev_entry.unwrap_or_else(|| Entry {
-                        hash: sess.hasher.result(),
-                        path: self.path.clone(),
-                        });
-                let (entry, is_same) = if sess.hasher.result() == prev.hash {
-                    (prev, true)
+                let (entry, is_same) = if Some(sess.hasher.result()) == self.prev_entry.map(|p| p.hash ) {
+                    (self.prev_entry.unwrap(), true)
                 } else {
                     (Entry {
                             hash: sess.hasher.result(),
                             path: self.path.clone(),
                     }, false)
                 };
-                self.ret.send(HelperFinishedCachingMsg(Ok((self.key, entry))));
+                let res = HelperCachingResult {
+                    result: Ok((self.key, entry)),
+                    hif: self.own.take().unwrap(),
+                    sender: self.client_ret.clone(),
+                };
+                self.ret.send(HelperFinishedCachingMsg(res));
             }
         }
         sess.hasher.reset();
     }
-    fn do_work(&self, sess: &mut HelperSession) {
+    fn do_work(&mut self, sess: &mut HelperSession) {
         {
-            let fout = match File::open_mode(self.path, Open, Write) {
+            let fout = match File::open_mode(&self.path, Open, Write) {
                 Ok(fout) => fout,
                 e => {
-                    self.ret(sess, Some(e));
+                    self.ret(sess, e.err());
                     return;
                 }
             };
             let mut size: i64 = 0;
-            for buf in self.work.recv.iter() {
-                match fout.write(buf) {
+            for buf in self.recv.iter() {
+                match fout.write(buf.as_slice()) {
                     Ok(()) => (),
                     e => {
-                        self.ret(sess, Some(e));
+                        self.ret(sess, e.err());
                         return;
                     }
                 }
                 match sess.hasher.write(buf) {
                     Ok(()) => (),
                     e => {
-                        self.ret(sess, Some(e));
+                        self.ret(sess, e.err());
                         return;
                     }
                 }
-                size += buf.len();
+                size += buf.len() as i64;
             }
             match fout.truncate(size) {
                 Ok(()) => (),
                 e => {
-                    self.ret(sess, Some(e));
+                    self.ret(sess, e.err());
                     return;
                 }
             }
             match fout.datasync() {
                 Ok(()) => (),
                 e => {
-                    self.ret(sess, Some(e));
+                    self.ret(sess, e.err());
                     return;
                 }
             }
@@ -382,37 +340,35 @@ struct HelperIf {
     chan: Sender<HelperWork>,
 }
 impl HelperIf {
-    
-}
 
+}
 pub struct SessionIf {
     /// the chan to the global workcache task
     chan: Sender<Message>,
 }
 impl SessionIf {
-    
-    // starts the global workcache task and returns the seeding interface
-    pub fn new(db: &Path,
-               artifact: &Path) -> IoResult<SessionIf> {
-        Session::new(Sender::new(), db, artifact)
+    /// Clones this interface without sending an add ref message.
+    fn fake_clone(&self) -> SessionIf {
+        SessionIf {
+            chan: self.chan.clone(),
+        }
     }
 
     pub fn cache_cargo<'a, T: CachableWork<'a>>(&self,
                                                 address: Address,
                                                 cargo: T) -> Future<CachingResult> {
         static SEND_BUFFER_BYTES: uint = 1024;
-        let (port, chan) = channel();
-        let (ret, ret_chan) = channel();
-        self.chan.send(CacheMsg(ret, port, address));
-        
+        let (s, r) = channel();
+        let (ret_s, ret_r) = channel();
+        self.chan.send(CacheMsg(ret_s, r, address));
+
         let mut writer = io::BufferedWriter::with_capacity(SEND_BUFFER_BYTES,
-                                                           io::ChanWriter::new(chan));
+                                                           io::ChanWriter::new(s));
         {
-            let mut encoder = ebml::writer::Encoder::new(&mut writer as &mut Writer);
-            cargo.encode(&mut encoder);
+            unimplemented!();
         }
         writer.flush();
-        Future::from_receiver(ret)
+        Future::from_receiver(ret_r)
     }
 }
 impl clone::Clone for SessionIf {
@@ -427,4 +383,8 @@ impl ops::Drop for SessionIf {
     fn drop(&mut self) {
         self.chan.send(DropIfRefMsg(None));
     }
+}
+
+pub fn new_interface(sv: driver::SupervisorIf) -> WorkcacheIf {
+    Session::new(sv)
 }

@@ -18,16 +18,20 @@
 use syntax::codemap::CodeMap;
 
 use address::Address;
+use driver::diagnostics::Driver;
 
-pub mod session;
-pub mod error_codes;
+pub mod database;
 pub mod diagnostics;
+pub mod error_codes;
+pub mod session;
+pub mod supervisor;
 
 pub type BuildId = uint;
 
 pub type DiagIf = diagnostics::SessionIf;
 //pub type DepIf  = super::dep::SessionIf;
-pub type WorkCacheIf = super::workcache::SessionIf;
+pub type WorkcacheIf = super::workcache::SessionIf;
+pub type SupervisorIf = supervisor::SupervisorIf;
 
 local_data_key!(diagnostics_: DiagIf)
 
@@ -35,7 +39,7 @@ pub fn initialize_diag(diag: DiagIf) {
     diagnostics_.replace(Some(diag));
 }
 pub fn deinitialize_diag() -> Option<DiagIf> {
-    diagnostics_.replace(None); 
+    diagnostics_.replace(None);
 }
 pub fn diagnostics() -> DiagIf {
     diagnostics_.get()
@@ -47,10 +51,25 @@ pub fn diagnostics() -> DiagIf {
 // NOTE: it is expected that this is set checkpoint style, and is otherwise immutable.
 local_data_key!(address_: Address)
 
-
-
 pub fn address() -> &'static Address {
-    address_.get()
-        .expect("task work address uninitialized!")
+    use std::mem::transmute;
+    unsafe {
+        transmute(&*address_.get()
+                  .expect("task work address uninitialized!"))
+    }
+}
+pub fn mut_address<R>(f: |&mut Address| -> R) -> R {
+    let mut addr = address().clone();
+    let ret = f(&mut addr);
+    address_.replace(Some(addr));
+    ret
 }
 
+pub struct NewTaskState {
+    diag: DiagIf,
+}
+
+impl NewTaskState {
+    pub fn new() -> NewTaskState {
+    }
+}

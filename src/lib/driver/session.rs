@@ -31,7 +31,7 @@ use railroad::YardId;
 use super::super::{TargetId, SubtargetId};
 
 use super::diagnostics;
-use super::{DiagIf, WorkCacheIf};
+use super::{DiagIf, WorkcacheIf};
 
 // Interfaces:
 // FIXME(diamond): add supervisors.
@@ -47,9 +47,6 @@ pub enum StaleDataset<TSet> {
     // files are stale. This will also happen if the db was corrupted.
     AllStaleDataset,
     SpecificStaleDataset(TSet),
-}
-pub trait IsStale {
-    fn is_stale(&self, path: &Path) -> bool;
 }
 impl<TMap: collections::Map<Path, TMV>, TMV> StaleDataset<TMap> {
     pub fn is_set_stale(&self, path: &Path) -> bool {
@@ -78,13 +75,12 @@ enum FreshnessMessage {
     QueryIndividualFreshnessMsg(Sender<HashMap<Path, bool>>, HashSet<Path>),
     TrackFreshnessMsg(HashMap<Path, TrackingMeta>),
 
-    // you should almost always prefer to signal the individual files as fresh
+    // you should almost always prefer to signal individual files as fresh
     // instead of this 'nuke from orbit' option.
     RefreshFreshnessMsg,
-    //
     SignalFreshnessMsg(HashSet<Path>),
 }
-#[deriving(Clone, Eq, Encodable, Decodable)]
+#[deriving(Clone, Eq, PartialEq, Encodable, Decodable)]
 pub struct TrackingMeta {
     last_mod: u64,
     traverse_symlinks: bool,
@@ -98,16 +94,15 @@ struct FreshnessDb {
     tracking: HashMap<Path, TrackingMeta>,
 }
 impl FreshnessDb {
-    fn load(path: &Path) -> Option<FreshnessDb> {
-        
+    fn load() -> Option<FreshnessDb> {
+
     }
     /// if the return is None, it means all files should be considered stale.
-    fn find_stale_files(&self, logger: &DiagIf) -> Option<IoTimeStampResultDataMap> {
+    fn find_stale_files(&self) -> Option<IoTimeStampResultDataMap> {
         if self.tracking.len() == 0 {
             None
         } else {
-            Some(self
-                 .tracking
+            Some(self.tracking
                  .iter()
                  .map(|(path, tracked)| {
                      (path, match tracked.traverse_symlinks {
@@ -116,39 +111,43 @@ impl FreshnessDb {
                      }, tracked.last_mod)
                  })
                  .filter_map(|(path, stat_result, old_ts)| {
-                     (path, match stat_result {
+                     match stat_result {
                          Ok(FileStat { modified: modified, ..}) if modified > old_ts => {
-                             Some(Ok(modified))
+                             Some((path.clone(), Ok(modified)))
                          }
                          Ok(_) => None,
-                         Err(err) => Some(Err(err)),
-                     })
-                 }).collect())
+                         Err(err) => Some((path.clone(), Err(err))),
+                     }
+                 })
+                 .collect())
         }
     }
 }
 // FreshnessIf responds to queries regarding the freshness state of tracked files.
 // Naturally, it also maintains the list of files we use to decide what needs to be built.
-// It is target independent due to the target independent nature of source files.
+// It is target independent due to the target independent nature of source
+// files.
+#[deriving(Clone)]
 pub struct FreshnessIf {
     chan: Sender<FreshnessMessage>,
 }
 static FRESHNESS_DB_VERSION: uint = 0;
 impl FreshnessIf {
-    fn run_db(port: &Receiver<FreshnessMessage>,
-              logger: &DiagIf,
-              db_path: &Path) -> bool {
+    fn run_db(port: &Receiver<FreshnessMessage>) -> bool {
         let (mut stale_map,
              mut dragnetting,
-             mut tracking_map) = match FreshnessDb::load(logger, db_path) {
-            Some(mut db) => match db.find_stale_files(logger) {
+             mut tracking_map) = match FreshnessDb::load() {
+            Some(mut db) => match db.find_stale_files() {
                 Some(stale_map) => (stale_map, false, db.tracking),
                 None => (HashMap::new(), true, db.tracking),
             },
             None => (HashMap::new(), true, HashMap::new()),
         };
-        let tracking_set = tracking_map.keys().collect();
-        let mut new_tracks = HashMap::new();
+        let tracking_set: HashSet<Path> = tracking_map
+            .keys()
+            .map(|k| k.clone() )
+            .collect();
+        let mut new_tracks: HashMap<Path, TrackingMeta> = HashMap::new();
         let mut ref_count: u64 = 1;
 
         fn modified(p: &Path) -> IoResult<u64> {
@@ -165,34 +164,36 @@ impl FreshnessIf {
                         true => {
                             queried
                                 .move_iter()
-                                .map(|p| stale_map.find_or_insert_with(p.clone(), modified) )
+                                .map(|p| (p, *stale_map.find_or_insert_with(p.clone(), modified)) )
                                 .collect()
                         }
                         false => {
-                            let queried = tracking_set.intersection(queried);
-                            queried
-                                .move_iter()
-                                .filter_map(|p| stale_map.find_equiv(p) )
+                            tracking_set
+                                .intersection(&queried)
+                                .filter_map(|p| {
+                                    stale_map
+                                        .find(p)
+                                        .map(|r| (p.clone(), r.clone()))
+                                })
                                 .collect()
                         }
                     };
-                    ret.try_send(result);
+                    let _ = ret.send_opt(result);
                 }
                 QueryAnyFreshnessMsg(ret, queried) => {
                     match dragnetting {
                         true => {
                             // send ret value immediately, then do processing.
-                            ret.try_send(true);
+                            let _ = ret.send_opt(true);
                             for p in queried.move_iter() {
                                 stale_map.find_or_insert_with(p, modified);
                             }
                         }
                         false => {
-                            let queried = tracking_set.intersection(queried);
-                            let result = queried
-                                .move_iter()
-                                .any(|p| stale_map.contains_key_equiv(p) );
-                            ret.try_send(result);
+                            let result = tracking_set
+                                .intersection(&queried)
+                                .any(|p| stale_map.contains_key(p) );
+                            let _ = ret.send_opt(result);
                         }
                     }
                 }
@@ -200,26 +201,26 @@ impl FreshnessIf {
                     match dragnetting {
                         true => {
                             // send ret value immediately, then do processing.
-                            ret.try_send(queried.iter().map(|p| (p, true) ).collect());
+                            let _ = ret.send_opt(queried.iter().map(|p| (p.clone(), true) ).collect());
                             for p in queried.move_iter() {
                                 stale_map.find_or_insert_with(p, modified);
                             }
                         }
                         false => {
-                            let queried = tracking_set.intersection(queried);
-                            let result = queried
-                                .move_iter()
-                                .map(|p| (p, stale_map.contains_key_equiv(p)) )
+                            let result = tracking_set
+                                .intersection(&queried)
+                                .map(|p| (p.clone(), stale_map.contains_key(p)) )
                                 .collect();
-                            ret.try_send(result);
+                            let _ = ret.send_opt(result);
                         }
                     }
                 }
 
                 TrackFreshnessMsg(to_track) => {
-                    let to_track = to_track.move_iter();
-                    new_tracks.extend(to_track.clone());
-                    tracking_set.extend(to_track.map(|(p, _)| p));
+                    for (p, meta) in to_track.move_iter() {
+                        new_tracks.insert(p.clone(), meta.clone());
+                        tracking_set.insert(p);
+                    }
                 }
             }
         }
@@ -228,13 +229,13 @@ impl FreshnessIf {
         let tracking = tracking_map
             .move_iter()
             .filter_map(|(p, meta)| {
-                let newly_tracked = new_tracks.pop(p);
+                let newly_tracked = new_tracks.pop(&p);
                 if meta.removable {
-                    newly_tracked.map(|meta| (p, meta) )
+                    newly_tracked.map(|meta| (p.clone(), meta.clone()) )
                 } else {
                     Some((p,
                           TrackingMeta {
-                                last_mod: match stale_map.pop(p) {
+                                last_mod: match stale_map.pop(&p) {
                                     Some(Ok(modified)) => modified,
                                     Some(Err(_)) | None => {
                                         // keep the old mod time
@@ -250,18 +251,18 @@ impl FreshnessIf {
         let db = FreshnessDb {
             tracking: tracking,
         };
-        db.save(db_path);
+        //db.save(db_path);
 
         return ref_count != 0;
     }
     fn task(port: Receiver<FreshnessMessage>,
             diag: DiagIf,
             db_path: &Path) {
-        while FreshnessIf::run_db(port, &diag, db_path) {}
+        while FreshnessIf::run_db(&port) {}
     }
 
-    fn new(diag: DiagIf, db_path: Path) -> FreshnessIf {
-        
+    fn new() -> FreshnessIf {
+
     }
 
     pub fn is_fresh(&self, path: Path) -> Future<bool> {
@@ -270,20 +271,20 @@ impl FreshnessIf {
         self.are_any_fresh(set)
     }
     pub fn are_any_fresh(&self, paths: HashSet<Path>) -> Future<bool> {
-        let (port, chan) = channel();
-        self.chan.send(QueryAnyFreshnessMsg(chan, paths));
-        Future::from_receiver(port)
+        let (s, r) = channel();
+        self.chan.send(QueryAnyFreshnessMsg(s, paths));
+        Future::from_receiver(r)
     }
     pub fn individual_freshness(&self, paths: HashSet<Path>) -> Future<HashMap<Path, bool>> {
-        let (port, chan) = channel();
-        self.chan.send(QueryIndividualFreshnessMsg(chan, paths));
-        Future::from_receiver(port)
+        let (s, r) = channel();
+        self.chan.send(QueryIndividualFreshnessMsg(s, paths));
+        Future::from_receiver(r)
     }
 
     pub fn staleness(&self, paths: HashSet<Path>) -> Future<IoTimeStampResultDataMap> {
-        let (port, chan) = channel();
-        self.chan.send(QueryStalenessMsg(chan, paths));
-        Future::from_receiver(port)
+        let (s, r) = channel();
+        self.chan.send(QueryStalenessMsg(s, paths));
+        Future::from_receiver(r)
     }
     pub fn track_one(&self, path: Path, meta: TrackingMeta) {
         let mut paths = HashMap::new();
@@ -293,27 +294,14 @@ impl FreshnessIf {
     pub fn track_all(&self, paths: HashMap<Path, TrackingMeta>) {
         self.chan.send(TrackFreshnessMsg(paths));
     }
-}
 
-// Defines the interface to session data managed on a per target basis.
-pub struct TargetIf;
-
-#[deriving(Clone)]
-pub struct Session {
-    diag:       diagnostics::SessionIf,
-    freshness:  FreshnessIf,
-//    dep:        DepIf,
-    workcache:  WorkCacheIf,
-}
-impl Session {
-    pub fn freshness<'a>(&'a self) -> &'a FreshnessIf {
-        self.freshness
-    }
-    /*pub fn dep<'a>(&'a self) -> &'a DepIf {
-        self.dep
-    }*/
-    pub fn workcache<'a>(&'a self) -> &'a WorkCacheIf {
-        self.workcache
+    // Inform the manager that the provided addresses were changed. This expects
+    // only source prefix addresses.
+    // IDE writers: if you'd like to preemptively compile the project (such as
+    // before the user has explicitly saved a file), create a source file
+    // override first then call this.
+    pub fn signal_stale(&self, addrs: HashSet<Address>) {
+        unimplemented!()
     }
 }
 
@@ -321,26 +309,23 @@ impl Session {
 pub struct Router {
     addr: Address,
 
-    diag:   diagnostics::SessionIf,
-//    dep:    DepIf,
-    wc:     WorkCacheIf,
-    //build:  build_crate::SessionIf,
+    yard_to_id: HashMap<String, YardId>,
 }
 impl Router {
-    pub fn address<'a>(&'a self) -> &'a Address { &self.address }
 
-    pub fn incr_yard(&mut self, yard: YardId) {
-        self.address = self.address.with_yard_suffex(yard);
+    pub fn resolve_yard(&self, name: &str) -> Option<YardId> {
+        self.yard_to_id
+            .find_equiv(&name.to_string())
+            .map(|&c| c )
     }
+
     // injects a dep to another yard.
     pub fn inject_crate_dep(&self, yard: YardId, dep: Address) {
-        self.dep.inject_crate_dep(self.addr.clone(), yard, dep)
     }
     // reports a dep of this yard.
     pub fn report_crate_dep(&self, krate: CrateId, phase: CratePhase) {
-        
+
     }
     pub fn report_fs_deps(&self, files: Vec<Path>) {
-        self.dep.report_fs_deps(self.addr.clone(), files)
     }
 }
